@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Hooking</AssemblyName>
+    <RootNamespace>Hooking</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\Hooking.ico</ApplicationIcon>
+    <RebuildNativeWorker Condition="'$(RebuildNativeWorker)' == ''">false</RebuildNativeWorker>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Native\HookingWorker.exe" LogicalName="HookingWorker.exe" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Icons used by the interface and the tray. Pack URIs read them back at run time. -->
+    <Resource Include="Assets\Hooking.png" />
+    <Resource Include="Assets\Hooking.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Taskbar notification area (tray) icon with its context menu. -->
+    <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
+  </ItemGroup>
+
+  <!-- Inputs/Outputs makes MSBuild recompile the engine only when its source is
+       newer than the binary (or the binary is missing), and skip it otherwise.
+       Without this the embedded worker would quietly go stale after an edit.
+       Force a rebuild with -p:RebuildNativeWorker=true. -->
+  <Target Name="BuildHookingWorker" BeforeTargets="BeforeBuild"
+          Inputs="$(MSBuildProjectDirectory)\Native\HookingWorker.cpp"
+          Outputs="$(MSBuildProjectDirectory)\Native\HookingWorker.exe"
+          Condition="'$(RebuildNativeWorker)' != 'true'">
+    <Exec Command="&quot;$(MSBuildProjectDirectory)\Native\build-worker.cmd&quot; &quot;$(MSBuildProjectDirectory)\Native&quot; &quot;$(MSBuildProjectDirectory)\Native&quot;" />
+  </Target>
+
+  <Target Name="ForceRebuildHookingWorker" BeforeTargets="BeforeBuild"
+          Condition="'$(RebuildNativeWorker)' == 'true'">
+    <Exec Command="&quot;$(MSBuildProjectDirectory)\Native\build-worker.cmd&quot; &quot;$(MSBuildProjectDirectory)\Native&quot; &quot;$(MSBuildProjectDirectory)\Native&quot;" />
+  </Target>
+
+</Project>

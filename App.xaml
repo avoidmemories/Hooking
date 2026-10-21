@@ -1,0 +1,15 @@
+<Application x:Class="Hooking.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- No StartupUri: the window is created explicitly in OnStartup. With
+         StartupUri set, WPF builds the main window unconditionally, so the
+         diagnostic entry points below would spawn a full interface as a side
+         effect — a second engine process and a second writer of settings. -->
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Themes/Controls.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

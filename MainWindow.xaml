@@ -1,0 +1,629 @@
+<Window x:Class="Hooking.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:tb="http://www.hardcodet.net/taskbar"
+        Title="Hooking"
+        Width="1100" Height="600"
+        MinWidth="1100" MinHeight="600"
+        MaxWidth="1100" MaxHeight="600"
+        SizeToContent="Manual"
+        WindowStartupLocation="CenterScreen"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize"
+        SnapsToDevicePixels="True"
+        UseLayoutRounding="True"
+        TextOptions.TextFormattingMode="Display"
+        TextOptions.TextRenderingMode="ClearType"
+        FontFamily="Segoe UI"
+        SourceInitialized="Window_SourceInitialized">
+
+    <Window.Resources>
+        <!-- Notification area icon. A left click brings the window back; a right click
+             opens the menu. The menu label follows the engine state when it opens. -->
+        <tb:TaskbarIcon x:Key="TrayIcon"
+                        IconSource="pack://application:,,,/Assets/Hooking.ico"
+                        ToolTipText="Hooking"
+                        TrayLeftMouseUp="Tray_LeftMouseUp">
+            <tb:TaskbarIcon.ContextMenu>
+                <ContextMenu Opened="TrayMenu_Opened">
+                    <MenuItem Header="Turn On" Click="TrayToggle_Click" />
+                    <Separator />
+                    <MenuItem Header="Exit" Click="TrayExit_Click" />
+                </ContextMenu>
+            </tb:TaskbarIcon.ContextMenu>
+        </tb:TaskbarIcon>
+    </Window.Resources>
+
+    <Grid>
+        <!-- The frame fills the window.
+             An inset was used to leave room for a drop shadow, and that made the real
+             window larger than the interface inside it: a screenshot tool capturing the
+             window picked up a border of desktop, and the system had somewhere to draw
+             its own chrome. The window is now exactly the frame. -->
+        <!-- Dragging is limited to the header bands: the Hooking name on the left and the
+             top of the content on the right. The rest of the window does not move it, so a
+             click on a list or a label never picks the window up. Controls claim their own
+             clicks and are excluded in code. -->
+        <Border x:Name="Frame" CornerRadius="{StaticResource WindowRadius}"
+                Background="{StaticResource WindowBrush}"
+                BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="252" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <!-- ============================================================
+                     Sidebar
+                     ============================================================ -->
+                <Border Grid.Column="0" Background="{StaticResource SidebarBrush}"
+                        CornerRadius="8,0,0,8">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <!-- Product name, centred in the chrome band so it sits on the same
+                             line as the window buttons opposite. The band is draggable. -->
+                        <Border Grid.Row="0" Height="56" Background="Transparent"
+                                MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+                            <StackPanel Orientation="Horizontal" Margin="20,0,0,0" VerticalAlignment="Center">
+                                <Image Source="pack://application:,,,/Assets/Hooking.png"
+                                       Width="18" Height="18" VerticalAlignment="Center"
+                                       RenderOptions.BitmapScalingMode="HighQuality">
+                                    <Image.RenderTransform>
+                                        <TranslateTransform Y="2" />
+                                    </Image.RenderTransform>
+                                </Image>
+                                <TextBlock Text="Hooking" Style="{StaticResource BrandText}"
+                                           Margin="10,0,0,0" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Border>
+
+                        <TextBlock Grid.Row="1" Text="Game Profiles" Style="{StaticResource GameProfilesHeading}"
+                                   Margin="20,0,0,8" VerticalAlignment="Bottom" />
+
+                        <!-- Both lists scroll by pixel, not by item.
+                             A ListBox defaults to item scrolling, where the scroll offset is
+                             an index rather than a distance: a wheel step of one row became a
+                             jump of many. Declared here because a run time change to the
+                             viewer is overwritten by the list that owns it. -->
+                        <ListBox Grid.Row="3" x:Name="ProfileList"
+                                 Background="Transparent" BorderThickness="0"
+                                 Margin="10,0,10,0"
+                                 ItemContainerStyle="{StaticResource SidebarItem}"
+                                 ScrollViewer.CanContentScroll="False"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 SelectionChanged="ProfileList_SelectionChanged"
+                                 PreviewMouseLeftButtonUp="ProfileList_MouseUp">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Background="Transparent" Height="28">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="24" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <TextBlock Text="{Binding DisplayName}"
+                                                   Foreground="{StaticResource TextBrush}"
+                                                   FontSize="12.5" FontWeight="Medium"
+                                                   VerticalAlignment="Center"
+                                                   TextTrimming="CharacterEllipsis" />
+
+                                        <!-- Only the status dot: removal is the hold
+                                             button's job. -->
+                                        <Ellipse Grid.Column="1"
+                                                 Width="7" Height="7"
+                                                 HorizontalAlignment="Right" VerticalAlignment="Center"
+                                                 Margin="0,0,7,0"
+                                                 Fill="{Binding RunningBrush}"
+                                                 ToolTip="{Binding RunningHint}" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+
+                        <!-- Footer: the main action, then the two that apply to the
+                             selected row, mirroring the reference layout. -->
+                        <!-- Add, rename and remove side by side: one primary action and
+                             two that act on the selected row. -->
+                        <Grid Grid.Row="4" Margin="18,10,18,12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <Button x:Name="AddProfileButton" Style="{StaticResource AddGameButton}"
+                                    HorizontalAlignment="Stretch"
+                                    Click="AddProfile_Click" ToolTip="Add a game profile">
+                                <!-- Drawn rather than typed: a font plus sign sits off centre
+                                     because of its side bearings. -->
+                                <Viewbox Width="16" Height="16">
+                                    <Canvas Width="20" Height="20">
+                                        <Path Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                              StrokeThickness="2.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                              Data="M10 3 L10 17 M3 10 L17 10" />
+                                    </Canvas>
+                                </Viewbox>
+                            </Button>
+
+                            <Button x:Name="RenameProfileButton" Style="{StaticResource FooterIconButton}"
+                                    Grid.Column="1" Margin="8,0,0,0"
+                                    Click="RenameProfile_Click" ToolTip="Rename the selected game">
+                                <Viewbox Width="16" Height="16">
+                                    <Canvas Width="20" Height="20">
+                                        <Path Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                              StrokeThickness="1.9" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                              StrokeLineJoin="Round"
+                                              Data="M13.5 3.5 L16.5 6.5 L6.5 16.5 L3 17 L3.5 13.5 Z" />
+                                        <Path Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                              StrokeThickness="1.9" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                              Data="M12 5 L15 8" />
+                                    </Canvas>
+                                </Viewbox>
+                            </Button>
+
+                            <Button x:Name="RemoveProfileButton" Style="{StaticResource FooterIconButton}"
+                                    Grid.Column="2" Margin="8,0,0,0"
+                                    Click="RemoveSelectedProfile_Click" ToolTip="Remove the selected game">
+                                <Viewbox Width="16" Height="16">
+                                    <Canvas Width="20" Height="20">
+                                        <!-- A waste bin, for removing the selection. -->
+                                        <Path Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                              StrokeThickness="1.9" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                              StrokeLineJoin="Round"
+                                              Data="M4 6 L16 6 M8.5 6 L8.5 3.5 L11.5 3.5 L11.5 6 M5.5 6 L6.5 16.5 L13.5 16.5 L14.5 6" />
+                                        <Path Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                              StrokeThickness="1.9" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                              Data="M8.6 9 L8.6 13.5 M11.4 9 L11.4 13.5" />
+                                    </Canvas>
+                                </Viewbox>
+                            </Button>
+                        </Grid>
+
+                        <Border Grid.Row="5" Height="1" Background="{StaticResource DividerBrush}"
+                                Margin="18,0,18,8" />
+
+                        <Button Grid.Row="6" x:Name="SettingsNav" Style="{StaticResource NavButton}"
+                                Margin="12,0,12,12" Click="SettingsNav_Click" ToolTip="Application settings">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="24" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+
+                                <Viewbox Grid.Column="0" Width="16" Height="16" HorizontalAlignment="Left"
+                                         VerticalAlignment="Center">
+                                    <Canvas Width="24" Height="24">
+                                        <Path Stroke="{StaticResource SubTextBrush}" StrokeThickness="1.9"
+                                              StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                              Data="M12 15.2 A3.2 3.2 0 1 0 12 8.8 A3.2 3.2 0 1 0 12 15.2" />
+                                        <Path Stroke="{StaticResource SubTextBrush}" StrokeThickness="1.9"
+                                              StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                              Data="M12 2.5 L12 5.2 M12 18.8 L12 21.5 M21.5 12 L18.8 12 M5.2 12 L2.5 12 M18.7 5.3 L16.8 7.2 M7.2 16.8 L5.3 18.7 M18.7 18.7 L16.8 16.8 M7.2 7.2 L5.3 5.3" />
+                                    </Canvas>
+                                </Viewbox>
+
+                                <TextBlock Grid.Column="1" Text="Settings" FontSize="12.5" FontWeight="Medium"
+                                           Foreground="{StaticResource TextBrush}" VerticalAlignment="Center" />
+                            </Grid>
+                        </Button>
+                    </Grid>
+                </Border>
+
+                <!-- ============================================================
+                     Content
+                     ============================================================ -->
+                <Grid Grid.Column="1">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <!-- Header.
+
+                         Two bands: the window buttons, then the switch with the profile line
+                         beside it. The gap above the switch (under the window buttons) equals
+                         the gap below it (to the pairs panel), so the switch sits centred
+                         between them. -->
+                    <Grid Grid.Row="0" Background="Transparent">
+                        <!-- Two bands: the window buttons, then the switch. The switch band is
+                             exactly the switch's height, so nothing is clipped at the bottom. -->
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="48" />
+                            <RowDefinition Height="32" />
+                        </Grid.RowDefinitions>
+
+                        <!-- Drag area: only the top band, behind the window buttons. The
+                             switch band and the profile line below it are not draggable. -->
+                        <Border Grid.Row="0" Background="Transparent"
+                                MouseLeftButtonDown="TitleBar_MouseLeftButtonDown" />
+
+                        <!-- Chrome band: the window buttons, level with the product name
+                             opposite. -->
+                        <StackPanel Grid.Row="0" Orientation="Horizontal"
+                                    VerticalAlignment="Center" HorizontalAlignment="Right"
+                                    Margin="0,0,14,0">
+                            <Button x:Name="MinimizeButton" Style="{StaticResource ChromeButton}"
+                                    Click="Minimize_Click" Margin="7,0,0,0" ToolTip="Minimize">
+                                <!-- Drawn into a fixed square canvas inside a Viewbox, so the
+                                     dash lands dead centre of the cell. A bare Path sizes
+                                     itself to its own geometry, which leaves the glyph sitting
+                                     off centre by the width of the stroke. -->
+                                <Viewbox Width="16" Height="16">
+                                    <Canvas Width="16" Height="16">
+                                        <Path Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                              StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                              Data="M4 8 L12 8" />
+                                    </Canvas>
+                                </Viewbox>
+                            </Button>
+                            <Button x:Name="CloseButton" Style="{StaticResource CloseChromeButton}"
+                                    Background="Transparent" Click="Close_Click" ToolTip="Close">
+                                <Viewbox Width="16" Height="16">
+                                    <Canvas Width="16" Height="16">
+                                        <Path Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                              StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                              Data="M4.5 4.5 L11.5 11.5 M11.5 4.5 L4.5 11.5" />
+                                    </Canvas>
+                                </Viewbox>
+                            </Button>
+                        </StackPanel>
+
+                        <!-- The switch, on its own row between the window buttons and the
+                             profile line, and inset from the right to line up with the panel
+                             below it. -->
+                        <Grid Grid.Row="1" Margin="22,0,22,0">
+                            <!-- The profile line shares this band with the switch, so the
+                                 pairs panel below can sit close to the switch. -->
+                            <StackPanel x:Name="HeaderPanel" Orientation="Horizontal"
+                                        VerticalAlignment="Center" HorizontalAlignment="Left">
+                                <TextBlock x:Name="HeaderTitle" Style="{StaticResource TitleText}" />
+                                <TextBlock x:Name="HeaderProfile" Style="{StaticResource BodyText}"
+                                           VerticalAlignment="Center" Margin="10,0,0,0"
+                                           TextTrimming="CharacterEllipsis" />
+                            </StackPanel>
+
+                            <Border x:Name="MasterSwitch" Grid.Column="1"
+                                    Background="{StaticResource CellBrush}"
+                                    BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1"
+                                    CornerRadius="{StaticResource ControlRadius}" Padding="12,0" Height="32"
+                                    HorizontalAlignment="Right"
+                                    Cursor="Hand"
+                                    MouseLeftButtonDown="MasterSwitch_MouseDown"
+                                    ToolTip="Arm or disarm the snap tap engine">
+                                <Grid>
+                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <TextBlock x:Name="MasterSwitchLabel" Text="OFF"
+                                                   Foreground="{StaticResource SubTextBrush}"
+                                                   FontSize="12" FontWeight="Bold"
+                                                   Width="34" TextAlignment="Center"
+                                                   VerticalAlignment="Center" />
+                                        <CheckBox x:Name="MasterToggle" Style="{StaticResource PillToggle}"
+                                                  Margin="8,0,0,0" IsHitTestVisible="False" />
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </Grid>
+
+                    </Grid>
+
+                    <!-- ====================================================
+                         Page: key pairs of the selected game
+                         ==================================================== -->
+                    <Grid Grid.Row="1" x:Name="PairsPage" Margin="22,14,22,18">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <Border Grid.Row="0" Style="{StaticResource Card}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="ADD KEY PAIR" Style="{StaticResource SectionLabel}"
+                                               Margin="0,0,0,10" />
+
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <!-- Named, so the whole group can be dimmed and
+                                             disabled when there is no game to attach a pair
+                                             to. -->
+                                        <StackPanel x:Name="PairComposer" Grid.Column="0" Orientation="Horizontal">
+                                            <TextBox x:Name="FirstKeyBox" Style="{StaticResource KeyBox}" Width="74"
+                                                     PreviewKeyDown="KeyCaptureBox_PreviewKeyDown" />
+                                            <TextBlock Text=":" Foreground="{StaticResource MutedTextBrush}"
+                                                       FontSize="14" FontWeight="SemiBold"
+                                                       VerticalAlignment="Center" Margin="9,0" />
+                                            <TextBox x:Name="SecondKeyBox" Style="{StaticResource KeyBox}" Width="74"
+                                                     PreviewKeyDown="KeyCaptureBox_PreviewKeyDown" />
+                                            <Button x:Name="AddPairButton" Content="Add pair"
+                                                    Style="{StaticResource PrimaryButton}"
+                                                    Click="AddPair_Click" Margin="12,0,0,0" />
+                                            <Button x:Name="ClearPairButton" Content="Clear"
+                                                    Style="{StaticResource SecondaryButton}"
+                                                    Click="ClearComposer_Click" Margin="8,0,0,0" />
+                                        </StackPanel>
+                                    </Grid>
+                                </StackPanel>
+
+                                <!-- Input method as a segmented control: the two choices
+                                     exclude each other, which separate buttons did not show. -->
+                                <StackPanel Grid.Column="1" VerticalAlignment="Bottom">
+                                    <TextBlock Text="INPUT METHOD" Style="{StaticResource SectionLabel}"
+                                               Margin="0,0,0,10" />
+                                    <!-- The white backing sits behind both segments and slides between them,
+                                         so the selection travels rather than jumping. -->
+                                    <Border x:Name="ModeTrough" Style="{StaticResource SegmentTrough}">
+                                        <Grid>
+                                            <Border x:Name="SegmentBacking" Background="{StaticResource WhiteBrush}"
+                                                    CornerRadius="{StaticResource ControlRadius}"
+                                                    HorizontalAlignment="Left" Width="0" IsHitTestVisible="False" />
+
+                                            <StackPanel Orientation="Horizontal">
+                                                <RadioButton x:Name="ModeReleaseSegment" Content="Release"
+                                                             Style="{StaticResource SegmentToggle}"
+                                                             GroupName="InputMethod" Checked="ModeRelease_Click"
+                                                             ToolTip="Your keys always reach the game. Safest." />
+                                                <RadioButton x:Name="ModeBlockingSegment" Content="Blocking"
+                                                             Style="{StaticResource SegmentToggle}"
+                                                             GroupName="InputMethod" Checked="ModeBlocking_Click"
+                                                             ToolTip="Physical keys are replaced by injected ones." />
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+
+                        <Border Grid.Row="1" Style="{StaticResource Card}" Margin="0,14,0,0">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
+
+                                <TextBlock x:Name="PairsLabel" Text="PAIRS" Style="{StaticResource SectionLabel}"
+                                           Margin="0,0,0,10" />
+
+                                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
+                                              HorizontalScrollBarVisibility="Disabled"
+                                              Style="{StaticResource Viewer}">
+                                    <!-- Room on every side: a chip outline sits on its own edge,
+                                         and without it the outer chips lost their corners. -->
+                                    <WrapPanel x:Name="PairsPanel" Margin="1,1,5,1" />
+                                </ScrollViewer>
+                            </Grid>
+                        </Border>
+                    </Grid>
+
+                    <!-- ====================================================
+                         Page: settings
+                         ==================================================== -->
+                    <ScrollViewer Grid.Row="1" x:Name="SettingsPage" Visibility="Collapsed"
+                                  Margin="22,14,22,18" VerticalScrollBarVisibility="Auto"
+                                  Style="{StaticResource Viewer}">
+                        <StackPanel>
+                            <Border Style="{StaticResource Card}">
+                                <StackPanel>
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,16">
+                                        <Button Style="{StaticResource BackButton}" Click="CancelNewProfile_Click"
+                                                ToolTip="Back to the selected game">
+                                            <Viewbox Width="15" Height="15">
+                                                <Canvas Width="20" Height="20">
+                                                    <Path Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                          StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                                          StrokeLineJoin="Round"
+                                                          Data="M12 4 L6 10 L12 16" />
+                                                </Canvas>
+                                            </Viewbox>
+                                        </Button>
+                                        <TextBlock Text="Settings" Style="{StaticResource CardTitle}"
+                                                   Margin="12,0,0,0" VerticalAlignment="Center" />
+                                    </StackPanel>
+
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Text="Start with Windows" Foreground="{StaticResource TextBrush}"
+                                                       FontSize="13" FontWeight="Medium" />
+                                            <TextBlock Text="Launch Hooking when you sign in, so the engine is armed before you play."
+                                                       Style="{StaticResource BodyText}" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                        <CheckBox Grid.Column="1" x:Name="StartWithWindowsToggle"
+                                                  Style="{StaticResource PillToggle}"
+                                                  VerticalAlignment="Center" Click="StartWithWindows_Changed" />
+                                    </Grid>
+
+                                </StackPanel>
+                            </Border>
+
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <!-- ====================================================
+                         Page: new profile
+
+                         Replaces the content area rather than opening a second
+                         window, so adding a game stays inside the app.
+                         ==================================================== -->
+                    <Grid Grid.Row="1" x:Name="NewProfilePage" Visibility="Collapsed"
+                          Margin="22,14,22,18">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <!-- Title and Browse share one row: the name on the left, the picker on
+                             the right, both the same height. Keeping them side by side frees a
+                             whole row for the process list, which is the part that needs room. -->
+                        <Border Grid.Row="0" Style="{StaticResource Card}">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,14">
+                                    <Button Style="{StaticResource BackButton}" Click="CancelNewProfile_Click"
+                                            ToolTip="Back">
+                                        <Viewbox Width="15" Height="15">
+                                            <Canvas Width="20" Height="20">
+                                                <Path Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                      StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                                      StrokeLineJoin="Round"
+                                                      Data="M12 4 L6 10 L12 16" />
+                                            </Canvas>
+                                        </Viewbox>
+                                    </Button>
+                                    <TextBlock Text="New Profile" Style="{StaticResource CardTitle}"
+                                               Margin="12,0,0,0" VerticalAlignment="Center" />
+                                </StackPanel>
+
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <StackPanel Grid.Column="0">
+                                        <TextBlock Text="TITLE" Style="{StaticResource FieldLabel}" />
+                                        <TextBox x:Name="NewProfileTitleBox" Style="{StaticResource FieldBox}"
+                                                 Height="34" Width="300" HorizontalAlignment="Left"
+                                                 Padding="10,0" Margin="0,0,12,0"
+                                                 TextChanged="NewProfileTitle_Changed"
+                                                 Text="New Profile" />
+
+                                    </StackPanel>
+
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock Text="Path" Style="{StaticResource FieldLabel}" />
+                                        <StackPanel Orientation="Horizontal">
+                                            <!-- Read only: it shows what Browse chose. Typing a
+                                                 path by hand was never supported. -->
+                                            <TextBox x:Name="BrowsePathBox" Style="{StaticResource FieldBox}"
+                                                     Height="34" Width="300" Padding="10,0"
+                                                     IsReadOnly="True"
+                                                     TextChanged="BrowsePath_Changed" />
+                                            <Button Content="Browse" Style="{StaticResource SecondaryButton}"
+                                                    Height="34" Width="104" Margin="8,0,0,0"
+                                                    Click="BrowseProcess_Click"
+                                                    ToolTip="Pick an executable from disk" />
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- The process list takes the remaining height, so scrolling through
+                             running applications is comfortable. -->
+                        <Border Grid.Row="1" Style="{StaticResource Card}" Margin="0,14,0,0" Padding="16,14,9,14">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
+
+                                <Grid Margin="0,0,0,7">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Text="RUNNING PROCESSES" Style="{StaticResource FieldLabel}"
+                                               Margin="0,0,0,0" VerticalAlignment="Center" />
+
+
+                                    <!-- Narrow and pinned to the right edge: it is a filter,
+                                         not a field to fill in, so it should not take the
+                                         width of the row. -->
+                                    <TextBox Grid.Column="1" x:Name="ProcessSearchBox" Style="{StaticResource FieldBox}"
+                                             Height="28" Width="150" HorizontalAlignment="Right"
+                                             Padding="9,0" TextChanged="ProcessSearch_Changed"
+                                             ToolTip="Filter by name" />
+                                </Grid>
+
+                                <ListBox Grid.Row="1" x:Name="ProcessList"
+                                         Background="{StaticResource FieldBrush}"
+                                         BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1"
+                                         ItemContainerStyle="{StaticResource SidebarItem}"
+                                         ScrollViewer.CanContentScroll="False"
+                                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                         SelectionChanged="ProcessList_SelectionChanged"
+                                         PreviewMouseLeftButtonDown="ProcessList_PreviewMouseLeftButtonDown">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Height="24">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+
+                                                <!-- Icons appear here only: the profile list stays
+                                                     textual, so the sidebar reads as names. -->
+                                                <Image Source="{Binding Icon}" Width="16" Height="16"
+                                                       Margin="0,0,9,0" VerticalAlignment="Center"
+                                                       RenderOptions.BitmapScalingMode="HighQuality" />
+
+                                                <TextBlock Grid.Column="1" Text="{Binding Headline}"
+                                                           Foreground="{StaticResource TextBrush}"
+                                                           FontSize="12" VerticalAlignment="Center"
+                                                           TextTrimming="CharacterEllipsis" />
+
+                                                <!-- The chosen executable is marked in place rather
+                                                     than in a field of its own, so no extra row is
+                                                     needed to show what was picked. -->
+                                                <TextBlock Grid.Column="2" Text="{Binding StatusLabel}"
+                                                           Foreground="{StaticResource SubTextBrush}"
+                                                           FontSize="11" VerticalAlignment="Center"
+                                                           Margin="12,0,0,0" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                            </Grid>
+                        </Border>
+
+                        <Border Grid.Row="2" Style="{StaticResource Card}" Margin="0,14,0,0">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+
+                                <TextBlock Text="START WITH DEFAULT PAIRS" Foreground="{StaticResource TextBrush}"
+                                           FontSize="13" FontWeight="Medium" VerticalAlignment="Center" />
+
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <CheckBox x:Name="NewProfileAutoToggle"
+                                              Style="{StaticResource PillToggle}" VerticalAlignment="Center"
+                                              IsChecked="True" />
+                                    <Button Content="Add" Style="{StaticResource PrimaryButton}"
+                                            Margin="18,0,0,0" Click="ConfirmNewProfile_Click" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                    </Grid>
+                </Grid>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

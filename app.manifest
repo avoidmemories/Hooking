@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="Hooking.app" />
+
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
+    <security>
+      <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
+        <!-- Windows is asked for elevation on every launch.
+
+             This is not a preference. A low level keyboard hook only receives input
+             destined for processes at or below its own integrity level, so a normal
+             Hooking cannot see the keystrokes of a game that runs elevated. GTA V
+             with BattlEye is exactly that: the engine would arm correctly, the hook
+             would never be called, and the game would look like it was ignoring snap
+             tap when in fact nothing ever reached us.
+
+             requireAdministrator means the user sees a prompt instead of a silently
+             broken feature, and the engine then works in every game. -->
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">permonitorv2,permonitor</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>
