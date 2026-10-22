@@ -36,7 +36,7 @@ public class Probe {
 }
 "@
 
-foreach ($name in @('TslGame', 'Hooking', 'HookingWorker', 'explorer')) {
+foreach ($name in @('TslGame', 'SnapHook', 'SnapHookWorker', 'explorer')) {
     $procs = Get-Process -Name $name -ErrorAction SilentlyContinue
     if (-not $procs) { Write-Output ("{0,-14} not running" -f $name); continue }
     foreach ($p in $procs) {

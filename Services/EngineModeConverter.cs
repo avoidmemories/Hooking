@@ -1,8 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Hooking.Models;
+using SnapHook.Models;
 
-namespace Hooking.Services;
+namespace SnapHook.Services;
 
 /// <summary>
 /// Reads and writes <see cref="EngineMode"/> as a name, and never fails.

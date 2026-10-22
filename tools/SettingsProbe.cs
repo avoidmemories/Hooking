@@ -3,15 +3,15 @@
 // disagreement between "what is on disk" and "what the app loaded" can be
 // pinpointed instead of guessed at.
 //
-//   Hooking.exe --settings-probe <report path>
+//   SnapHook.exe --settings-probe <report path>
 
 using System.IO;
 using System.Text;
 using System.Text.Json;
-using Hooking.Models;
-using Hooking.Services;
+using SnapHook.Models;
+using SnapHook.Services;
 
-namespace Hooking;
+namespace SnapHook;
 
 internal static class SettingsProbe
 {
@@ -44,7 +44,7 @@ internal static class SettingsProbe
                     Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(allowIntegerValues: true) }
                 });
 
-            report.AppendLine($"direct parse    enabled={direct?.HookingEnabled} profiles={direct?.Profiles.Count} anyPairs={direct?.Presets.Count}");
+        report.AppendLine($"direct parse    enabled={direct?.SnapHookEnabled} profiles={direct?.Profiles.Count} anyPairs={direct?.Presets.Count}");
         }
         catch (Exception exception)
         {
@@ -52,7 +52,7 @@ internal static class SettingsProbe
         }
 
         var loaded = store.Load();
-        report.AppendLine($"store.Load      enabled={loaded.HookingEnabled} profiles={loaded.Profiles.Count} anyPairs={loaded.Presets.Count}");
+        report.AppendLine($"store.Load      enabled={loaded.SnapHookEnabled} profiles={loaded.Profiles.Count} anyPairs={loaded.Presets.Count}");
         report.AppendLine($"store.LoadError {store.LoadError ?? "(none)"}");
         report.AppendLine($"suppress save   {store.SuppressNextSave}");
 

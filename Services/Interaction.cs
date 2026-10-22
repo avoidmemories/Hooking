@@ -4,7 +4,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 
-namespace Hooking.Services;
+namespace SnapHook.Services;
 
 /// <summary>
 /// Click and hover feedback shared by the whole interface.

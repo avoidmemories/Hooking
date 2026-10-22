@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace Hooking.Models;
+namespace SnapHook.Models;
 
 /// <summary>
 /// One key pairing. When <see cref="FirstKey"/> and <see cref="SecondKey"/> are held
@@ -51,9 +51,8 @@ public sealed class AppSettings
     /// <summary>
     /// Master switch. The worker process is alive exactly when this is true.
     /// </summary>
-    // Stored under its original key, so settings written before the rename still load.
-    [JsonPropertyName("SnapTapEnabled")]
-    public bool HookingEnabled { get; set; }
+    [JsonPropertyName("SnapHookEnabled")]
+    public bool SnapHookEnabled { get; set; }
 
     /// <summary>
     /// Pairs kept from the retired "Apply to any application" mode.

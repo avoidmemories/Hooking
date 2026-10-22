@@ -1,9 +1,9 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
-using Hooking.Models;
+using SnapHook.Models;
 
-namespace Hooking.Services;
+namespace SnapHook.Services;
 
 /// <summary>
 /// Enumerates the applications a profile can target. Games are windowed
@@ -45,7 +45,9 @@ public sealed class ProcessService
                 return true;
             }
 
-            if (processName.Equals("Hooking", StringComparison.OrdinalIgnoreCase) ||
+            if (processName.Equals("SnapHook", StringComparison.OrdinalIgnoreCase) ||
+                processName.Equals("SnapHookWorker", StringComparison.OrdinalIgnoreCase) ||
+                processName.Equals("Hooking", StringComparison.OrdinalIgnoreCase) ||
                 processName.Equals("HookingWorker", StringComparison.OrdinalIgnoreCase))
             {
                 return true;

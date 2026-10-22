@@ -1,6 +1,6 @@
 using System.Threading;
 
-namespace Hooking.Services;
+namespace SnapHook.Services;
 
 /// <summary>
 /// Keeps one interface process alive at a time.
@@ -16,8 +16,8 @@ namespace Hooking.Services;
 /// </summary>
 public sealed class SingleInstance : IDisposable
 {
-    private const string MutexName = @"Local\Hooking.SingleInstance";
-    private const string ShowEventName = @"Local\Hooking.ShowWindow";
+    private const string MutexName = @"Local\SnapHook.SingleInstance";
+    private const string ShowEventName = @"Local\SnapHook.ShowWindow";
 
     private Mutex? _mutex;
     private EventWaitHandle? _showEvent;

@@ -22,5 +22,5 @@ if not defined VSDEVCMD (
 call "%VSDEVCMD%" -arch=x64 -host_arch=x64 >nul
 if errorlevel 1 exit /b %errorlevel%
 
-cl /nologo /std:c++20 /O2 /EHsc /DUNICODE /D_UNICODE /Fe:"%OUTDIR%\HookingWorker.exe" "%SRCDIR%\HookingWorker.cpp" user32.lib shell32.lib
+cl /nologo /std:c++20 /O2 /EHsc /DUNICODE /D_UNICODE /Fe:"%OUTDIR%\SnapHookWorker.exe" "%SRCDIR%\SnapHookWorker.cpp" user32.lib shell32.lib
 exit /b %errorlevel%

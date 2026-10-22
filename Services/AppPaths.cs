@@ -1,15 +1,15 @@
 using System.IO;
 
-namespace Hooking.Services;
+namespace SnapHook.Services;
 
 /// <summary>
 /// Owns the application's persistent-data paths. User settings live under
-/// %APPDATA%\Hooking; installed program files never do.
+/// %APPDATA%\SnapHook; installed program files never do.
 /// </summary>
 public sealed class AppPaths
 {
-    /// <summary>Folder used by earlier builds, before the rename to Hooking.</summary>
-    private const string LegacyFolderName = "SnapTap";
+    /// <summary>Folders used before the application was named SnapHook.</summary>
+    private static readonly string[] LegacyFolderNames = ["Hooking", "SnapTap"];
 
     public string RootDirectory { get; }
     public string SettingsFile { get; }
@@ -23,13 +23,16 @@ public sealed class AppPaths
     public AppPaths()
     {
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        RootDirectory = Path.Combine(appData, "Hooking");
+        RootDirectory = Path.Combine(appData, "SnapHook");
         SettingsFile = Path.Combine(RootDirectory, "settings.json");
-        WorkerExecutable = Path.Combine(AppContext.BaseDirectory, "HookingWorker.exe");
+        WorkerExecutable = Path.Combine(AppContext.BaseDirectory, "SnapHookWorker.exe");
 
         Directory.CreateDirectory(RootDirectory);
 
-        MigrateLegacySettings(Path.Combine(appData, LegacyFolderName, "settings.json"));
+        foreach (var legacyFolder in LegacyFolderNames)
+        {
+            MigrateLegacySettings(Path.Combine(appData, legacyFolder, "settings.json"));
+        }
     }
 
     /// <summary>

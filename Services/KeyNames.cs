@@ -1,6 +1,6 @@
 using System.Windows.Input;
 
-namespace Hooking.Services;
+namespace SnapHook.Services;
 
 /// <summary>
 /// Converts between the key names stored in settings, Windows virtual keys and

@@ -1,6 +1,6 @@
 param(
-    [string]$ProcessName = "Hooking",
-    [string]$OutFile = "C:\Users\gysar\source\repos\ONEKEY\Hooking\tools\shot.png"
+    [string]$ProcessName = "SnapHook",
+    [string]$OutFile = "C:\Users\gysar\source\repos\ONEKEY\SnapHook\tools\shot.png"
 )
 
 Add-Type -AssemblyName System.Drawing

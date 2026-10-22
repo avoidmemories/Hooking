@@ -1,4 +1,4 @@
-// HookingWorker — release-only snap tap engine.
+// SnapHookWorker — release-only snap tap engine.
 //
 // Design notes
 // ------------
@@ -23,7 +23,7 @@
 // for everything that matters.
 //
 // Usage:
-//   HookingWorker.exe --profile "TslGame|30:32,17:31" --profile "cs2|30:32"
+//   SnapHookWorker.exe --profile "TslGame|30:32,17:31" --profile "cs2|30:32"
 //                     [--any "30:32"] [--debug]
 //
 // A profile pairs a process image name with its scan code pairs. The profile
@@ -116,8 +116,8 @@ constexpr WORD kExtendedBit = 0x100;
 
 // Signature written into dwExtraInfo on every event this worker sends.
 //
-// "HOOKING" in ASCII, at an offset that keeps it clear of anything the system uses.
-constexpr ULONG_PTR kOwnTag = 0x484F4F4B494E47ULL;
+// "SNAPHOOK" in ASCII, at an offset that keeps it clear of anything the system uses.
+constexpr ULONG_PTR kOwnTag = 0x4B4F4F4850414E53ULL;
 
 // How events reach the game. Chosen per profile, because games differ in what
 // they actually read.
@@ -1271,7 +1271,7 @@ DWORD WINAPI ShutdownWatchdog(LPVOID)
 // ------------------------------------------------------------------ selftest
 
 // Drives the engine directly, with no hook and no real keyboard, and reports
-// the resulting key state. Run with:  HookingWorker.exe --selftest <log path>
+// the resulting key state. Run with:  SnapHookWorker.exe --selftest <log path>
 //
 // A pair A(30):D(32) is used. The expected transcript is:
 //   press A     -> A held, A seen by the game
@@ -1919,7 +1919,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 // before the process ends.
     if (g_shutdownEventName.empty())
     {
-        g_shutdownEventName = L"Local\\HookingWorkerStop";
+        g_shutdownEventName = L"Local\\SnapHookWorkerStop";
     }
 
     g_shutdownEvent = CreateEventW(nullptr, TRUE, FALSE, g_shutdownEventName.c_str());

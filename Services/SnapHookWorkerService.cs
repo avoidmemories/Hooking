@@ -3,9 +3,9 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
-using Hooking.Models;
+using SnapHook.Models;
 
-namespace Hooking.Services;
+namespace SnapHook.Services;
 
 /// <summary>
 /// Owns the lifecycle of the native snap tap worker.
@@ -16,10 +16,10 @@ namespace Hooking.Services;
 /// WPF process cannot promise that budget while collecting garbage or laying out
 /// the UI, so the hook is kept away from the interface entirely.
 /// </summary>
-public sealed class HookingWorkerService(AppPaths paths) : IDisposable
+public sealed class SnapHookWorkerService(AppPaths paths) : IDisposable
 {
     private Process? _process;
-    private string _shutdownEventName = "Local\\HookingWorkerStop";
+    private string _shutdownEventName = "Local\\SnapHookWorkerStop";
 
     /// <summary>
     /// Every scan code the current configuration manages.
@@ -67,7 +67,7 @@ public sealed class HookingWorkerService(AppPaths paths) : IDisposable
         _wantRunning = false;
         _lastStart = DateTime.UtcNow;
 
-        if (!settings.HookingEnabled)
+        if (!settings.SnapHookEnabled)
         {
             State = WorkerState.Stopped;
             LastError = null;
@@ -76,7 +76,7 @@ public sealed class HookingWorkerService(AppPaths paths) : IDisposable
 
         // A fresh name per start keeps a stale event from a previous worker out of
         // the way.
-        _shutdownEventName = $"Local\\HookingWorkerStop_{Environment.ProcessId}_{Guid.NewGuid():N}";
+        _shutdownEventName = $"Local\\SnapHookWorkerStop_{Environment.ProcessId}_{Guid.NewGuid():N}";
 
         // Claims the generation, so any cleanup still pending from the previous stop
         // sees that it is out of date and leaves this worker alone.
@@ -334,7 +334,7 @@ public sealed class HookingWorkerService(AppPaths paths) : IDisposable
     /// </summary>
     private static void KillOrphans()
     {
-        foreach (var process in Process.GetProcessesByName("HookingWorker"))
+        foreach (var process in Process.GetProcessesByName("SnapHookWorker"))
         {
             try
             {
