@@ -1,4 +1,4 @@
-# Hooking
+# SnapHook
 
 SOCD: Snappy Tappy
 
