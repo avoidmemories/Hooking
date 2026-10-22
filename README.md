@@ -22,10 +22,13 @@ workload). `Native/build-worker.cmd` locates `VsDevCmd.bat` on its own.
 
 ## Where things are stored
 
-Everything lives in `%APPDATA%\Hooking\`:
+User data lives in `%APPDATA%\Hooking\`:
 
 - `settings.json` — profiles, key pairs, options
-- `runtime\HookingWorker.exe` — extracted copy of the engine
+
+`HookingWorker.exe` is shipped beside `Hooking.exe` in the build/publish folder.
+It is no longer extracted to AppData, so removing the program folder (or using an
+uninstaller that removes it) removes the worker too.
 
 ---
 

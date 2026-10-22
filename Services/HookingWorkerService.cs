@@ -94,7 +94,7 @@ public sealed class HookingWorkerService(AppPaths paths) : IDisposable
 
         try
         {
-            var executable = paths.ExtractWorker();
+            var executable = paths.WorkerExecutable;
             if (!File.Exists(executable))
             {
                 State = WorkerState.Failed;

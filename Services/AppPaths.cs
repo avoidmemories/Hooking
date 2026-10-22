@@ -1,11 +1,10 @@
 using System.IO;
-using System.Reflection;
 
 namespace Hooking.Services;
 
 /// <summary>
-/// Owns every path the application touches. Everything lives under
-/// %APPDATA%\Hooking so the app stays portable and self-contained.
+/// Owns the application's persistent-data paths. User settings live under
+/// %APPDATA%\Hooking; installed program files never do.
 /// </summary>
 public sealed class AppPaths
 {
@@ -14,17 +13,21 @@ public sealed class AppPaths
 
     public string RootDirectory { get; }
     public string SettingsFile { get; }
-    public string RuntimeDirectory { get; }
+    /// <summary>
+    /// The worker ships next to the application executable. Keeping it in the
+    /// install/publish directory makes it part of the program being removed,
+    /// rather than an executable left behind in the user's profile.
+    /// </summary>
+    public string WorkerExecutable { get; }
 
     public AppPaths()
     {
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         RootDirectory = Path.Combine(appData, "Hooking");
         SettingsFile = Path.Combine(RootDirectory, "settings.json");
-        RuntimeDirectory = Path.Combine(RootDirectory, "runtime");
+        WorkerExecutable = Path.Combine(AppContext.BaseDirectory, "HookingWorker.exe");
 
         Directory.CreateDirectory(RootDirectory);
-        Directory.CreateDirectory(RuntimeDirectory);
 
         MigrateLegacySettings(Path.Combine(appData, LegacyFolderName, "settings.json"));
     }
@@ -48,55 +51,4 @@ public sealed class AppPaths
         }
     }
 
-    /// <summary>
-    /// Unpacks the embedded worker next to the settings so the executable on disk
-    /// always matches the build the UI was compiled from.
-    /// </summary>
-    public string ExtractWorker()
-    {
-        var target = Path.Combine(RuntimeDirectory, "HookingWorker.exe");
-        var assembly = Assembly.GetExecutingAssembly();
-
-        using var stream = assembly.GetManifestResourceStream("HookingWorker.exe");
-        if (stream is null)
-        {
-            return target;
-        }
-
-        using var memory = new MemoryStream();
-        stream.CopyTo(memory);
-        var payload = memory.ToArray();
-
-        // Compare the payload rather than timestamps. A timestamp comparison
-        // silently kept a stale worker on disk whenever the file happened to be
-        // newer than the assembly, which meant a rebuilt engine was never picked
-        // up — the interface and the worker drifted apart.
-        if (File.Exists(target) && IsSameContent(target, payload))
-        {
-            return target;
-        }
-
-        var temporary = target + ".tmp";
-        File.WriteAllBytes(temporary, payload);
-        File.Move(temporary, target, overwrite: true);
-        return target;
-    }
-
-    private static bool IsSameContent(string path, byte[] payload)
-    {
-        try
-        {
-            var existing = new FileInfo(path);
-            if (existing.Length != payload.Length)
-            {
-                return false;
-            }
-
-            return File.ReadAllBytes(path).AsSpan().SequenceEqual(payload);
-        }
-        catch
-        {
-            return false;
-        }
-    }
 }

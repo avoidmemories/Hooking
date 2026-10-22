@@ -56,7 +56,7 @@
                 <Grid Grid.Row="0" Background="Transparent" MouseLeftButtonDown="Header_MouseLeftButtonDown">
                     <TextBlock Text="Profile name" Style="{StaticResource TitleText}" Margin="16,0,0,0" />
                     <Button Style="{StaticResource CloseChromeButton}" HorizontalAlignment="Right"
-                            Margin="0,0,8,0" Click="Cancel_Click" ToolTip="Close">
+                            Margin="0,0,8,0" Click="Cancel_Click">
                         <Viewbox Width="16" Height="16">
                             <Canvas Width="16" Height="16">
                                 <Path Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
@@ -87,7 +87,7 @@
                         <Button Grid.Column="1" Content="Browse"
                                 Style="{StaticResource SecondaryButton}"
                                 Height="34" Width="96" Margin="8,0,0,0"
-                                Click="Browse_Click" ToolTip="Pick an executable" />
+                                Click="Browse_Click" />
                     </Grid>
                 </StackPanel>
 

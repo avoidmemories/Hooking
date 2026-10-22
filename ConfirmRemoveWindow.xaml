@@ -46,7 +46,7 @@
                 <Grid Grid.Row="0" Background="Transparent" MouseLeftButtonDown="Header_MouseLeftButtonDown">
                     <TextBlock Text="Remove" Style="{StaticResource TitleText}" Margin="18,0,0,0" />
                     <Button Style="{StaticResource CloseChromeButton}" HorizontalAlignment="Right"
-                            Margin="0,0,8,0" Click="Cancel_Click" ToolTip="Cancel">
+                            Margin="0,0,8,0" Click="Cancel_Click">
                         <Viewbox Width="16" Height="16">
                             <Canvas Width="16" Height="16">
                                 <Path Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"

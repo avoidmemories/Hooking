@@ -35,14 +35,10 @@ public sealed class ProcessService
             {
                 using var process = Process.GetProcessById((int)pid);
                 processName = process.ProcessName;
-                try
-                {
-                    path = process.MainModule?.FileName;
-                }
-                catch
-                {
-                    // Elevation or bitness can hide the module. The name is enough.
-                }
+                // MainModule can be surprisingly slow (and can fail for a process of
+                // a different bitness). QueryFullProcessImageName only asks Windows
+                // for the image path and is sufficient for the profile UI.
+                path = TryGetPathById((int)pid);
             }
             catch
             {
@@ -136,12 +132,23 @@ public sealed class ProcessService
     {
         try
         {
-            return Process.GetProcessesByName(processName).FirstOrDefault()?.MainModule?.FileName;
+            foreach (var process in Process.GetProcessesByName(processName))
+            {
+                using (process)
+                {
+                    var path = TryGetPathById(process.Id);
+                    if (!string.IsNullOrWhiteSpace(path))
+                    {
+                        return path;
+                    }
+                }
+            }
         }
         catch
         {
-            return null;
         }
+
+        return null;
     }
 
     public static bool IsRunning(string processName)
@@ -169,6 +176,30 @@ public sealed class ProcessService
         return builder.ToString();
     }
 
+    private static string? TryGetPathById(int processId)
+    {
+        const uint ProcessQueryLimitedInformation = 0x1000;
+        var handle = OpenProcess(ProcessQueryLimitedInformation, false, processId);
+        if (handle == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        try
+        {
+            // The documented maximum Win32 path length is 32,767 characters.
+            var path = new StringBuilder(32768);
+            var length = (uint)path.Capacity;
+            return QueryFullProcessImageName(handle, 0, path, ref length)
+                ? path.ToString()
+                : null;
+        }
+        finally
+        {
+            CloseHandle(handle);
+        }
+    }
+
     private delegate bool EnumWindowsProc(IntPtr handle, IntPtr parameter);
 
     [DllImport("user32.dll")]
@@ -185,4 +216,19 @@ public sealed class ProcessService
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, int processId);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryFullProcessImageName(
+        IntPtr process,
+        uint flags,
+        StringBuilder executablePath,
+        ref uint size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
 }

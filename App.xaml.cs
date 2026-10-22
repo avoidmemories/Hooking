@@ -50,8 +50,8 @@ public partial class App : Application
 
         _instance.ListenForShowRequests(() => Dispatcher.BeginInvoke(() => _window?.ShowFromTray()));
 
-        // Started by the sign in task with --tray: the engine starts and the window stays
-        // in the tray. Started by hand, the window opens as usual.
+        // Started by the sign-in task with --tray: the engine starts and the window
+        // stays in the notification area. Started by hand, the window opens as usual.
         _window.Start(inTray: e.Args.Contains("--tray", StringComparer.OrdinalIgnoreCase));
     }
 

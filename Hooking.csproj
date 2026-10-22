@@ -14,12 +14,20 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="Native\HookingWorker.exe" LogicalName="HookingWorker.exe" />
+    <!-- The native engine is a program file, not per-user runtime data. The Link
+         puts it beside Hooking.exe both in bin and in the publish directory. -->
+    <Content Include="Native\HookingWorker.exe">
+      <Link>HookingWorker.exe</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Icons used by the interface and the tray. Pack URIs read them back at run time. -->
+    <!-- Main application icon plus compact, state-specific tray icons. -->
     <Resource Include="Assets\Hooking.png" />
+    <Resource Include="Assets\TrayEnabled.png" />
+    <Resource Include="Assets\TrayDisabled.png" />
     <Resource Include="Assets\Hooking.ico" />
   </ItemGroup>
 

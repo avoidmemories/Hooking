@@ -119,13 +119,6 @@ constexpr WORD kExtendedBit = 0x100;
 // "HOOKING" in ASCII, at an offset that keeps it clear of anything the system uses.
 constexpr ULONG_PTR kOwnTag = 0x484F4F4B494E47ULL;
 
-// How often a keystroke may trigger a foreground re-check.
-//
-// Arming is decided on a timer, so between two checks the focus can move. Verifying on
-// the keystroke closes that gap; this interval bounds the cost, since finding the
-// foreground means opening a process.
-constexpr DWORD kForegroundRecheckMs = 50;
-
 // How events reach the game. Chosen per profile, because games differ in what
 // they actually read.
 //
@@ -976,36 +969,22 @@ LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
     }
 
 
-    // The armed profile is verified against the foreground before it is used.
+    // Never query foreground windows or open processes from this callback.
     //
-    // Arming is decided on a timer, so between two checks the focus can move — a game
-    // taking full screen, a launcher handing over to the game, an alt tab. Acting on a
-    // stale answer is how keystrokes ended up going through untouched in a game that
-    // was on screen.
-    {
-        static DWORD lastCheck = 0;
-        const DWORD now = GetTickCount();
-
-        if (now - lastCheck >= kForegroundRecheckMs)
-        {
-            lastCheck = now;
-
-            const int current = FindActiveProfile();
-            if (current != g_activeProfile)
-            {
-                SwitchProfile(current);
-            }
-        }
-    }
-
-    // Taken with a short timeout, never blocking.
+    // Windows invokes a low-level hook synchronously and silently removes it when a
+    // callback takes longer than LowLevelHooksTimeout. After an Alt+Tab the old code
+    // did precisely that expensive work here (and could then wait for the foreground
+    // thread's state transition). The foreground event and the polling thread own
+    // profile detection; this callback only consumes their already-prepared state.
+    // That makes a missed or delayed focus notification harmless: a key may pass
+    // through during the 250 ms polling window, but the hook itself stays alive.
+    //
+    // Taken without waiting, never blocking.
     //
     // Windows removes a low level hook that takes longer than
-    // LowLevelHooksTimeout to return, and it does so silently: the hook simply
-    // stops being called and nothing reports it. The polling thread takes this same
-    // lock and, while holding it, injects events, so a plain lock_guard here could
-    // wait on it long enough to be removed — which is how snap tap died and stayed
-    // dead until the worker was restarted.
+    // LowLevelHooksTimeout to return, and it does so silently. The foreground
+    // threads take this same lock while they re-sync key state, so a plain lock_guard
+    // here could wait long enough for Windows to remove the hook.
     //
     // If the lock cannot be had in time the event is passed through untouched. That
     // costs one keystroke of snap tap and keeps the hook alive, which is the right

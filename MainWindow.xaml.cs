@@ -25,6 +25,8 @@ public partial class MainWindow : Window
 
     /// <summary>The notification area icon, declared in the window resources.</summary>
     private readonly TaskbarIcon _tray;
+    private readonly ImageSource _enabledTrayIcon = LoadTrayIcon("TrayEnabled.png");
+    private readonly ImageSource _disabledTrayIcon = LoadTrayIcon("TrayDisabled.png");
 
     /// <summary>
     /// Closing the window only hides it, so the engine keeps running in the tray.
@@ -52,6 +54,7 @@ public partial class MainWindow : Window
 
     /// <summary>Every candidate the process picker can offer, before filtering.</summary>
     private readonly List<ProcessCandidate> _processCandidates = [];
+    private int _processListLoadVersion;
     private bool _updatingMode;
     private StarBorderEffect? _starEffect;
 
@@ -130,6 +133,7 @@ public partial class MainWindow : Window
         _worker = new HookingWorkerService(_paths);
         _settings = _store.Load();
         _tray = (TaskbarIcon)FindResource("TrayIcon");
+        _tray.IconSource = _settings.HookingEnabled ? _enabledTrayIcon : _disabledTrayIcon;
 
         ConfigureWindowChrome();
         Closing += Window_Closing;
@@ -304,7 +308,7 @@ public partial class MainWindow : Window
     {
         if (sender is ContextMenu menu && menu.Items.Count > 0 && menu.Items[0] is MenuItem toggle)
         {
-            toggle.Header = _settings.HookingEnabled ? "Turn Off" : "Turn On";
+            toggle.Header = _settings.HookingEnabled ? "Disable" : "Enable";
         }
     }
 
@@ -431,7 +435,7 @@ public partial class MainWindow : Window
     /// It is a page rather than a dialog so the app stays one window, and so the
     /// running process list can be browsed without losing sight of the sidebar.
     /// </summary>
-    private void AddProfile_Click(object sender, RoutedEventArgs e)
+    private async void AddProfile_Click(object sender, RoutedEventArgs e)
     {
         // The list selection is parked while the form is open, so a stray click cannot
         // remove a game the user is no longer looking at.
@@ -449,8 +453,6 @@ public partial class MainWindow : Window
         // Reset the flag so the title tracks the list again on a fresh visit.
         _titleEditedByUser = false;
 
-        LoadProcessList();
-
         _pendingProcess = null;
         SelectSection(PresetSection.NewProfile);
 
@@ -458,10 +460,20 @@ public partial class MainWindow : Window
         // few letters, then click the process. Putting the caret in the title made
         // it look like a field that had to be filled in first.
         ProcessSearchBox.Focus();
+
+        // Enumerating processes and reading their image paths can be slow when a
+        // process is protected or sits on a slow drive. The page is already visible,
+        // so do that work away from the UI thread rather than making the plus button
+        // appear unresponsive.
+        await LoadProcessListAsync();
     }
 
     private void CancelNewProfile_Click(object sender, RoutedEventArgs e)
     {
+        // Ignore the result of an enumeration that was still running when Back was
+        // clicked. Process enumeration itself is intentionally not cancelled because
+        // Windows API calls in progress cannot be safely interrupted.
+        _processListLoadVersion++;
         SelectSection(PresetSection.Pairs);
 
         // The buttons belong to a game page, and the page has only just been asked for.
@@ -477,11 +489,19 @@ public partial class MainWindow : Window
     /// list showed games the machine did not even have installed. Only live
     /// processes are listed now, and Browse covers everything else.
     /// </summary>
-    private void LoadProcessList()
+    private async Task LoadProcessListAsync()
     {
+        var loadVersion = ++_processListLoadVersion;
         _processCandidates.Clear();
+        ProcessList.ItemsSource = null;
 
-        foreach (var app in _processes.ListRunning())
+        var applications = await Task.Run(_processes.ListRunning);
+        if (loadVersion != _processListLoadVersion || _currentSection != PresetSection.NewProfile)
+        {
+            return;
+        }
+
+        foreach (var app in applications)
         {
             _processCandidates.Add(new ProcessCandidate(app, true));
         }
@@ -591,6 +611,10 @@ public partial class MainWindow : Window
             return;
         }
 
+        // Show the path for a process chosen from the live list too. More
+        // importantly, the same path travels into the profile on Add, so the rename
+        // page can show it later just as it does for a browsed executable.
+        BrowsePathBox.Text = candidate.App.ExecutablePath ?? string.Empty;
         _pendingProcess = candidate.App;
 
         // The title follows the selection until the user edits it themselves.
@@ -863,7 +887,12 @@ public partial class MainWindow : Window
             return;
         }
 
-        var dialog = new RenameWindow(_selected.Title, _selected.ExecutablePath) { Owner = this };
+        // Profiles made by older versions did not retain the path of a process chosen
+        // from the live list. Resolve it on demand while that process is running, so
+        // their edit page gains the same information without requiring users to add
+        // the game again.
+        var executablePath = _selected.ExecutablePath ?? ProcessService.TryGetPath(_selected.ProcessName);
+        var dialog = new RenameWindow(_selected.Title, executablePath) { Owner = this };
 
         // Sized over this window and clipped, before anything is painted.
         dialog.CoverOwnerBeforeShow(this);
@@ -1253,15 +1282,48 @@ public partial class MainWindow : Window
         var borderBrush = new SolidColorBrush(normalBorder);
         var crossBrush = new SolidColorBrush(idleCross);
 
-        var label = new TextBlock
+        // The content is composed from separate controls rather than a formatted
+        // string. That keeps the reversible-arrow glyph genuinely horizontal while
+        // allowing the tile to measure the real width of long names such as
+        // Insert and PageUp.
+        var label = new StackPanel
         {
-            Text = pair.ToString(),
-            Foreground = (Brush)FindResource("TextBrush"),
-            FontSize = 13,
-            FontWeight = FontWeights.Medium,
+            Orientation = Orientation.Horizontal,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center
         };
+
+        label.Children.Add(new TextBlock
+        {
+            Text = pair.FirstKey,
+            Foreground = (Brush)FindResource("TextBrush"),
+            FontSize = 13,
+            FontWeight = FontWeights.Medium,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+
+        var separator = new TextBlock
+        {
+            Text = "⇆",
+            Foreground = (Brush)FindResource("MutedTextBrush"),
+            FontFamily = new FontFamily("Segoe UI Symbol"),
+            FontSize = 15,
+            FontWeight = FontWeights.SemiBold,
+            Width = 18,
+            TextAlignment = TextAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(6, 0, 6, 0)
+        };
+        label.Children.Add(separator);
+
+        label.Children.Add(new TextBlock
+        {
+            Text = pair.SecondKey,
+            Foreground = (Brush)FindResource("TextBrush"),
+            FontSize = 13,
+            FontWeight = FontWeights.Medium,
+            VerticalAlignment = VerticalAlignment.Center
+        });
 
         // Shown in place of the pair once the cross has been clicked.
         //
@@ -1286,21 +1348,11 @@ public partial class MainWindow : Window
             Height = 22,
             Opacity = 0,
             Cursor = Cursors.Hand,
-            ToolTip = "Remove pair"
         };
 
-        // Three columns: a spacer the width of the cross, the label, then the cross.
-        //
-        // The symmetric spacer is what centres the label in the tile as a whole.
-        // With the label left to share the free space, its centre sat 11 pixels left
-        // of the real centre, because the tile's left padding was 30 and the cross
-        // only 22. Matching the two sides fixes it for any text length.
-        // Label and cross share the cell, both centred.
-        //
-        // The label keeps the tile's centre, which is what its own layout has always
-        // produced; the cross is drawn over it and appears as the label dims. That is
-        // the arrangement the tile is meant to have, and it leaves the label's position
-        // untouched.
+        // The label takes its natural width. The Border has only a minimum width, not a
+        // fixed one, so a pair such as Insert ⇆ PageUp widens the tile just enough
+        // instead of clipping or overflowing the text.
         var content = new Grid();
         content.Children.Add(label);
         content.Children.Add(confirm);
@@ -2296,8 +2348,9 @@ public partial class MainWindow : Window
         _starEffect ??= StarBorderEffect.Attach(MasterSwitch);
 
         MasterToggle.IsChecked = on;
+        _tray.IconSource = on ? _enabledTrayIcon : _disabledTrayIcon;
         // A fixed width label, so the plate never resizes as the state changes.
-        MasterSwitchLabel.Text = on ? "ON" : "OFF";
+        MasterSwitchLabel.Text = on ? "ENABLED" : "DISABLED";
 
         MasterSwitchLabel.Foreground = (Brush)FindResource(on ? "TextBrush" : "SubTextBrush");
         MasterSwitch.BorderBrush = (Brush)FindResource(on ? "TextBrush" : "BorderBrushSoft");
@@ -2336,6 +2389,22 @@ public partial class MainWindow : Window
         var settle = Motion.Color(rest, 420, EasingMode.EaseOut);
         settle.BeginTime = TimeSpan.FromMilliseconds(60);
         brush.BeginAnimation(SolidColorBrush.ColorProperty, settle);
+    }
+
+    /// <summary>
+    /// Loads a notification-area image from the application's compiled resources.
+    /// The image is frozen because the tray library holds it for the application's
+    /// lifetime and never needs to mutate it.
+    /// </summary>
+    private static ImageSource LoadTrayIcon(string assetName)
+    {
+        var image = new BitmapImage();
+        image.BeginInit();
+        image.UriSource = new Uri($"pack://application:,,,/Assets/{assetName}", UriKind.Absolute);
+        image.CacheOption = BitmapCacheOption.OnLoad;
+        image.EndInit();
+        image.Freeze();
+        return image;
     }
 
     /// <summary>

@@ -23,12 +23,11 @@
         <!-- Notification area icon. A left click brings the window back; a right click
              opens the menu. The menu label follows the engine state when it opens. -->
         <tb:TaskbarIcon x:Key="TrayIcon"
-                        IconSource="pack://application:,,,/Assets/Hooking.ico"
-                        ToolTipText="Hooking"
+                        IconSource="pack://application:,,,/Assets/TrayEnabled.png"
                         TrayLeftMouseUp="Tray_LeftMouseUp">
             <tb:TaskbarIcon.ContextMenu>
                 <ContextMenu Opened="TrayMenu_Opened">
-                    <MenuItem Header="Turn On" Click="TrayToggle_Click" />
+                    <MenuItem Header="Enable" Click="TrayToggle_Click" />
                     <Separator />
                     <MenuItem Header="Exit" Click="TrayExit_Click" />
                 </ContextMenu>
@@ -125,7 +124,7 @@
                                                  HorizontalAlignment="Right" VerticalAlignment="Center"
                                                  Margin="0,0,7,0"
                                                  Fill="{Binding RunningBrush}"
-                                                 ToolTip="{Binding RunningHint}" />
+                                                 />
                                     </Grid>
                                 </DataTemplate>
                             </ListBox.ItemTemplate>
@@ -144,7 +143,7 @@
 
                             <Button x:Name="AddProfileButton" Style="{StaticResource AddGameButton}"
                                     HorizontalAlignment="Stretch"
-                                    Click="AddProfile_Click" ToolTip="Add a game profile">
+                                    Click="AddProfile_Click">
                                 <!-- Drawn rather than typed: a font plus sign sits off centre
                                      because of its side bearings. -->
                                 <Viewbox Width="16" Height="16">
@@ -158,7 +157,7 @@
 
                             <Button x:Name="RenameProfileButton" Style="{StaticResource FooterIconButton}"
                                     Grid.Column="1" Margin="8,0,0,0"
-                                    Click="RenameProfile_Click" ToolTip="Rename the selected game">
+                                    Click="RenameProfile_Click">
                                 <Viewbox Width="16" Height="16">
                                     <Canvas Width="20" Height="20">
                                         <Path Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
@@ -174,7 +173,7 @@
 
                             <Button x:Name="RemoveProfileButton" Style="{StaticResource FooterIconButton}"
                                     Grid.Column="2" Margin="8,0,0,0"
-                                    Click="RemoveSelectedProfile_Click" ToolTip="Remove the selected game">
+                                    Click="RemoveSelectedProfile_Click">
                                 <Viewbox Width="16" Height="16">
                                     <Canvas Width="20" Height="20">
                                         <!-- A waste bin, for removing the selection. -->
@@ -194,7 +193,7 @@
                                 Margin="18,0,18,8" />
 
                         <Button Grid.Row="6" x:Name="SettingsNav" Style="{StaticResource NavButton}"
-                                Margin="12,0,12,12" Click="SettingsNav_Click" ToolTip="Application settings">
+                                Margin="12,0,12,12" Click="SettingsNav_Click">
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="24" />
@@ -254,7 +253,7 @@
                                     VerticalAlignment="Center" HorizontalAlignment="Right"
                                     Margin="0,0,14,0">
                             <Button x:Name="MinimizeButton" Style="{StaticResource ChromeButton}"
-                                    Click="Minimize_Click" Margin="7,0,0,0" ToolTip="Minimize">
+                                    Click="Minimize_Click" Margin="7,0,0,0">
                                 <!-- Drawn into a fixed square canvas inside a Viewbox, so the
                                      dash lands dead centre of the cell. A bare Path sizes
                                      itself to its own geometry, which leaves the glyph sitting
@@ -268,7 +267,7 @@
                                 </Viewbox>
                             </Button>
                             <Button x:Name="CloseButton" Style="{StaticResource CloseChromeButton}"
-                                    Background="Transparent" Click="Close_Click" ToolTip="Close">
+                                    Background="Transparent" Click="Close_Click">
                                 <Viewbox Width="16" Height="16">
                                     <Canvas Width="16" Height="16">
                                         <Path Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
@@ -300,13 +299,13 @@
                                     HorizontalAlignment="Right"
                                     Cursor="Hand"
                                     MouseLeftButtonDown="MasterSwitch_MouseDown"
-                                    ToolTip="Arm or disarm the snap tap engine">
+                                    >
                                 <Grid>
                                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                        <TextBlock x:Name="MasterSwitchLabel" Text="OFF"
+                                        <TextBlock x:Name="MasterSwitchLabel" Text="DISABLED"
                                                    Foreground="{StaticResource SubTextBrush}"
                                                    FontSize="12" FontWeight="Bold"
-                                                   Width="34" TextAlignment="Center"
+                                                   Width="66" TextAlignment="Center"
                                                    VerticalAlignment="Center" />
                                         <CheckBox x:Name="MasterToggle" Style="{StaticResource PillToggle}"
                                                   Margin="8,0,0,0" IsHitTestVisible="False" />
@@ -350,9 +349,10 @@
                                         <StackPanel x:Name="PairComposer" Grid.Column="0" Orientation="Horizontal">
                                             <TextBox x:Name="FirstKeyBox" Style="{StaticResource KeyBox}" Width="74"
                                                      PreviewKeyDown="KeyCaptureBox_PreviewKeyDown" />
-                                            <TextBlock Text=":" Foreground="{StaticResource MutedTextBrush}"
-                                                       FontSize="14" FontWeight="SemiBold"
-                                                       VerticalAlignment="Center" Margin="9,0" />
+                                            <TextBlock Text="⇆" Foreground="{StaticResource MutedTextBrush}"
+                                                       FontFamily="Segoe UI Symbol" FontSize="15" FontWeight="SemiBold"
+                                                       Width="18" TextAlignment="Center" VerticalAlignment="Center"
+                                                       Margin="7,0" />
                                             <TextBox x:Name="SecondKeyBox" Style="{StaticResource KeyBox}" Width="74"
                                                      PreviewKeyDown="KeyCaptureBox_PreviewKeyDown" />
                                             <Button x:Name="AddPairButton" Content="Add pair"
@@ -426,7 +426,7 @@
                                 <StackPanel>
                                     <StackPanel Orientation="Horizontal" Margin="0,0,0,16">
                                         <Button Style="{StaticResource BackButton}" Click="CancelNewProfile_Click"
-                                                ToolTip="Back to the selected game">
+                                            >
                                             <Viewbox Width="15" Height="15">
                                                 <Canvas Width="20" Height="20">
                                                     <Path Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
@@ -445,16 +445,13 @@
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
-                                        <StackPanel>
-                                            <TextBlock Text="Start with Windows" Foreground="{StaticResource TextBrush}"
-                                                       FontSize="13" FontWeight="Medium" />
-                                            <TextBlock Text="Launch Hooking when you sign in, so the engine is armed before you play."
-                                                       Style="{StaticResource BodyText}" TextWrapping="Wrap" />
-                                        </StackPanel>
+                                        <TextBlock Text="Start with Windows" Foreground="{StaticResource TextBrush}"
+                                                   FontSize="13" FontWeight="Medium" VerticalAlignment="Center" />
                                         <CheckBox Grid.Column="1" x:Name="StartWithWindowsToggle"
                                                   Style="{StaticResource PillToggle}"
                                                   VerticalAlignment="Center" Click="StartWithWindows_Changed" />
                                     </Grid>
+
 
                                 </StackPanel>
                             </Border>
@@ -483,7 +480,7 @@
                             <StackPanel>
                                 <StackPanel Orientation="Horizontal" Margin="0,0,0,14">
                                     <Button Style="{StaticResource BackButton}" Click="CancelNewProfile_Click"
-                                            ToolTip="Back">
+                                            >
                                         <Viewbox Width="15" Height="15">
                                             <Canvas Width="20" Height="20">
                                                 <Path Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
@@ -525,7 +522,7 @@
                                             <Button Content="Browse" Style="{StaticResource SecondaryButton}"
                                                     Height="34" Width="104" Margin="8,0,0,0"
                                                     Click="BrowseProcess_Click"
-                                                    ToolTip="Pick an executable from disk" />
+                                                    />
                                         </StackPanel>
                                     </StackPanel>
                                 </Grid>
@@ -557,15 +554,17 @@
                                     <TextBox Grid.Column="1" x:Name="ProcessSearchBox" Style="{StaticResource FieldBox}"
                                              Height="28" Width="150" HorizontalAlignment="Right"
                                              Padding="9,0" TextChanged="ProcessSearch_Changed"
-                                             ToolTip="Filter by name" />
+                                             />
                                 </Grid>
 
                                 <ListBox Grid.Row="1" x:Name="ProcessList"
                                          Background="{StaticResource FieldBrush}"
                                          BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1"
                                          ItemContainerStyle="{StaticResource SidebarItem}"
-                                         ScrollViewer.CanContentScroll="False"
+                                         ScrollViewer.CanContentScroll="True"
                                          ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                         VirtualizingPanel.IsVirtualizing="True"
+                                         VirtualizingPanel.VirtualizationMode="Recycling"
                                          SelectionChanged="ProcessList_SelectionChanged"
                                          PreviewMouseLeftButtonDown="ProcessList_PreviewMouseLeftButtonDown">
                                     <ListBox.ItemTemplate>
