@@ -46,7 +46,7 @@ applications.
   while one of the pair keys is held.
 - Real key presses still reach the game; SnapHook only sends the synthetic
   release and restoration of the opposite key.
-- It is intended for profiles that need macro compatibility. Release remains the general default.
+- It is intended for profiles that need macro compatibility.
 
 ### Blocking — fallback
 
