@@ -26,10 +26,6 @@ User data lives in `%APPDATA%\Hooking\`:
 
 - `settings.json` — profiles, key pairs, options
 
-`HookingWorker.exe` is shipped beside `Hooking.exe` in the build/publish folder.
-It is no longer extracted to AppData, so removing the program folder (or using an
-uninstaller that removes it) removes the worker too.
-
 ---
 
 ## Limits worth knowing
