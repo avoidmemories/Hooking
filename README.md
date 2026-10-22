@@ -6,7 +6,7 @@ SOCD: Snappy Tappy
 
 ## Quick start
 
-1. Start `Hooking.exe` from the published folder and accept the Windows
+1. Start `SnapHook.exe` from the published folder and accept the Windows
    elevation prompt. Elevation is required so the keyboard hook can also see
    input sent to elevated games.
 2. Add a game profile. You can select an executable from disk or choose a
@@ -38,10 +38,10 @@ Blocking holds back the real key event and replaces it with a synthetic
 ## Building
 
 ```bash
-dotnet publish Hooking.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=false -p:DebugType=none -o publish
+dotnet publish SnapHook.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=false -p:DebugType=none -o publish
 ```
 
-The native worker is compiled automatically when `Native/HookingWorker.exe` is
+The native worker is compiled automatically when `Native/SnapHookWorker.exe` is
 missing. To force a rebuild:
 
 ```bash
@@ -53,7 +53,7 @@ workload). `Native/build-worker.cmd` locates `VsDevCmd.bat` on its own.
 
 ## Where things are stored
 
-User data lives in `%APPDATA%\Hooking\`:
+User data lives in `%APPDATA%\SnapHook\`:
 
 - `settings.json` — profiles, key pairs, options
 
