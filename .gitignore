@@ -20,6 +20,9 @@ Native/*.ilk
 Native/*.exp
 Native/*.lib
 
+# Legacy compiler output from builds made before Native/build-worker.cmd used /Fo.
+SnapHookWorker.obj
+
 *.tmp
 *.log
 *.bak

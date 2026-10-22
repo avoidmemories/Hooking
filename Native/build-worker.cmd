@@ -22,5 +22,6 @@ if not defined VSDEVCMD (
 call "%VSDEVCMD%" -arch=x64 -host_arch=x64 >nul
 if errorlevel 1 exit /b %errorlevel%
 
-cl /nologo /std:c++20 /O2 /EHsc /DUNICODE /D_UNICODE /Fe:"%OUTDIR%\SnapHookWorker.exe" "%SRCDIR%\SnapHookWorker.cpp" user32.lib shell32.lib
+rem Keep the intermediate object beside the generated worker, not in the project root.
+cl /nologo /std:c++20 /O2 /EHsc /DUNICODE /D_UNICODE /Fo:"%OUTDIR%\SnapHookWorker.obj" /Fe:"%OUTDIR%\SnapHookWorker.exe" "%SRCDIR%\SnapHookWorker.cpp" user32.lib shell32.lib
 exit /b %errorlevel%
