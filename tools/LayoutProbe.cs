@@ -4,7 +4,7 @@
 // transparent, layered window where a screen grab does not) and prints the
 // measured geometry of the important elements. Run with:
 //
-//   Hooking.exe --probe <output.png>
+//   SnapHook.exe --probe <output.png>
 //
 // It exits immediately afterwards and never touches the engine.
 
@@ -19,7 +19,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
-namespace Hooking;
+namespace SnapHook;
 
 internal static class LayoutProbe
 {
@@ -221,7 +221,7 @@ internal static class LayoutProbe
             // Settled on, since the loop toggles an odd number of times from off.
             Pump(window, 2500);
 
-            var workers = System.Diagnostics.Process.GetProcessesByName("HookingWorker").Length;
+            var workers = System.Diagnostics.Process.GetProcessesByName("SnapHookWorker").Length;
             report.AppendLine();
             report.AppendLine($"engine toggled 5x, workers alive = {workers} (expected 1 if armed, 0 if not)");
         }

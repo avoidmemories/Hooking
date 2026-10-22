@@ -7,8 +7,8 @@
 $ErrorActionPreference = 'Stop'
 
 $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-$name = 'Hooking'
-$exe = 'C:\Users\gysar\source\repos\ONEKEY\Hooking\bin\Debug\net10.0-windows\Hooking.exe'
+$name = 'SnapHook'
+$exe = 'C:\Users\gysar\source\repos\ONEKEY\SnapHook\bin\Debug\net10.0-windows\SnapHook.exe'
 
 Write-Output "=== before ==="
 $existing = (Get-ItemProperty -Path $key -Name $name -ErrorAction SilentlyContinue).$name

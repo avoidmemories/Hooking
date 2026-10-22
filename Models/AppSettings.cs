@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace Hooking.Models;
+namespace SnapHook.Models;
 
 /// <summary>
 /// One key pairing. When <see cref="FirstKey"/> and <see cref="SecondKey"/> are held
@@ -51,9 +51,8 @@ public sealed class AppSettings
     /// <summary>
     /// Master switch. The worker process is alive exactly when this is true.
     /// </summary>
-    // Stored under its original key, so settings written before the rename still load.
-    [JsonPropertyName("SnapTapEnabled")]
-    public bool HookingEnabled { get; set; }
+    [JsonPropertyName("SnapHookEnabled")]
+    public bool SnapHookEnabled { get; set; }
 
     /// <summary>
     /// Pairs kept from the retired "Apply to any application" mode.
@@ -121,6 +120,14 @@ public enum EngineMode
     Release,
 
     /// <summary>
+    /// Reads physical keys through Raw Input instead of a global low-level keyboard
+    /// hook. This keeps other macro and accessibility tools out of a hook chain.
+    /// It is the preferred fallback when Release works in the game but an external
+    /// macro tool becomes unreliable while the engine is armed.
+    /// </summary>
+    Hybrid,
+
+    /// <summary>
     /// The physical press is swallowed and replaced by an injected one, as in the
     /// original null-movement implementation.
     /// </summary>
@@ -136,18 +143,21 @@ public static class EngineModes
     public static string ToToken(EngineMode mode) => mode switch
     {
         EngineMode.Blocking => "blocking",
+        EngineMode.Hybrid => "hybrid",
         _ => "release"
     };
 
     public static string ToLabel(EngineMode mode) => mode switch
     {
         EngineMode.Blocking => "Blocking",
+        EngineMode.Hybrid => "Hybrid",
         _ => "Release"
     };
 
     public static EngineMode Parse(string? token) => token?.Trim().ToLowerInvariant() switch
     {
         "blocking" => EngineMode.Blocking,
+        "compatibility" or "hybrid" => EngineMode.Hybrid,
         _ => EngineMode.Release
     };
 }

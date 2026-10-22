@@ -1,7 +1,7 @@
 using System.Windows;
-using Hooking.Services;
+using SnapHook.Services;
 
-namespace Hooking;
+namespace SnapHook;
 
 public partial class App : Application
 {

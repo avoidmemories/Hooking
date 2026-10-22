@@ -4,7 +4,7 @@ using System.Security;
 using System.Text;
 using Microsoft.Win32;
 
-namespace Hooking.Services;
+namespace SnapHook.Services;
 
 /// <summary>
 /// Registers the application to launch with Windows.
@@ -17,15 +17,18 @@ namespace Hooking.Services;
 /// </summary>
 public sealed class StartupService
 {
-    private const string TaskName = "Hooking";
+    private const string TaskName = "SnapHook";
 
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
     /// <summary>Entry written by the Run key version of this feature.</summary>
-    private const string RunValueName = "Hooking";
+    private const string RunValueName = "SnapHook";
 
     /// <summary>Entry written by earlier builds, under the previous name.</summary>
-    private const string LegacyValueName = "SnapTap";
+    private static readonly string[] LegacyValueNames = ["Hooking", "SnapTap"];
+
+    /// <summary>Scheduled-task names written before the application was renamed.</summary>
+    private static readonly string[] LegacyTaskNames = ["Hooking", "SnapTap"];
 
     /// <summary>
     /// True when the scheduled task exists.
@@ -87,7 +90,8 @@ public sealed class StartupService
     /// </summary>
     public void Migrate()
     {
-        RemoveLegacyEntry();
+        var legacyTaskWasEnabled = LegacyTaskNames.Any(IsTaskPresent);
+        RemoveLegacyEntries();
 
         if (HasRunEntry())
         {
@@ -96,6 +100,7 @@ public sealed class StartupService
             if (SetEnabled(true))
             {
                 RemoveRunEntry();
+                RemoveLegacyTasks();
             }
             return;
         }
@@ -103,6 +108,16 @@ public sealed class StartupService
         if (IsEnabled())
         {
             SetEnabled(true);
+            RemoveLegacyTasks();
+            return;
+        }
+
+        // Keep "Start with Windows" enabled across the rename. The replacement
+        // task is created before its predecessor is removed, so a failed task
+        // creation cannot turn a previously working startup setting off.
+        if (legacyTaskWasEnabled && SetEnabled(true))
+        {
+            RemoveLegacyTasks();
         }
     }
 
@@ -111,19 +126,33 @@ public sealed class StartupService
     /// at an executable that no longer exists, so leaving it would make Windows report
     /// an error at every sign in.
     /// </summary>
-    private static void RemoveLegacyEntry()
+    private static void RemoveLegacyEntries()
     {
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(RunKey, writable: true);
-            if (key?.GetValue(LegacyValueName) is not null)
+            foreach (var legacyValueName in LegacyValueNames)
             {
-                key.DeleteValue(LegacyValueName, throwOnMissingValue: false);
+                if (key?.GetValue(legacyValueName) is not null)
+                {
+                    key.DeleteValue(legacyValueName, throwOnMissingValue: false);
+                }
             }
         }
         catch
         {
             // Nothing to clean up if the key cannot be opened.
+        }
+    }
+
+    private static bool IsTaskPresent(string taskName) =>
+        RunSchtasks($"/Query /TN \"{taskName}\"") == 0;
+
+    private static void RemoveLegacyTasks()
+    {
+        foreach (var legacyTaskName in LegacyTaskNames)
+        {
+            RunSchtasks($"/Delete /TN \"{legacyTaskName}\" /F");
         }
     }
 
@@ -166,7 +195,7 @@ public sealed class StartupService
         <?xml version="1.0" encoding="UTF-16"?>
         <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
           <RegistrationInfo>
-            <Description>Starts Hooking when you sign in to Windows.</Description>
+            <Description>Starts SnapHook when you sign in to Windows.</Description>
           </RegistrationInfo>
           <Triggers>
             <LogonTrigger>

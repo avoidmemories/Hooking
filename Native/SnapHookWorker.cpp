@@ -1,4 +1,4 @@
-// HookingWorker — release-only snap tap engine.
+// SnapHookWorker — release-only snap tap engine.
 //
 // Design notes
 // ------------
@@ -23,7 +23,7 @@
 // for everything that matters.
 //
 // Usage:
-//   HookingWorker.exe --profile "TslGame|30:32,17:31" --profile "cs2|30:32"
+//   SnapHookWorker.exe --profile "TslGame|30:32,17:31" --profile "cs2|30:32"
 //                     [--any "30:32"] [--debug]
 //
 // A profile pairs a process image name with its scan code pairs. The profile
@@ -34,6 +34,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <fcntl.h>
@@ -116,8 +117,8 @@ constexpr WORD kExtendedBit = 0x100;
 
 // Signature written into dwExtraInfo on every event this worker sends.
 //
-// "HOOKING" in ASCII, at an offset that keeps it clear of anything the system uses.
-constexpr ULONG_PTR kOwnTag = 0x484F4F4B494E47ULL;
+// "SNAPHOOK" in ASCII, at an offset that keeps it clear of anything the system uses.
+constexpr ULONG_PTR kOwnTag = 0x4B4F4F4850414E53ULL;
 
 // How events reach the game. Chosen per profile, because games differ in what
 // they actually read.
@@ -136,6 +137,7 @@ constexpr ULONG_PTR kOwnTag = 0x484F4F4B494E47ULL;
 enum class EngineMode
 {
     Release,
+    Hybrid,
     Blocking
 };
 
@@ -155,6 +157,10 @@ struct KeyState
 struct Profile
 {
     std::wstring target;
+    // Full executable path when the profile was selected from Browse or the
+    // running-process list. This is the authoritative identity: names such as
+    // GTA5.exe are shared by different launchers and separate clients.
+    std::wstring targetPath;
     EngineMode mode = EngineMode::Release;
     std::unordered_set<WORD> managedScanCodes;
     std::unordered_map<WORD, std::vector<WORD>> opponents;
@@ -162,6 +168,9 @@ struct Profile
 };
 
 HHOOK g_hook = nullptr;
+HWND g_rawInputWindow = nullptr;
+HINSTANCE g_instance = nullptr;
+DWORD g_mainThreadId = 0;
 
 // Tick of the last event the hook saw, and how many it has seen in total.
 //
@@ -181,7 +190,17 @@ volatile long g_busyEventCount = 0;
 HWINEVENTHOOK g_foregroundHook = nullptr;
 
 std::vector<Profile> g_profiles;
-int g_activeProfile = -1;
+// Published separately from the state lock for the Hybrid Raw Input path. The
+// profiles vector is immutable after startup; the lock still protects every
+// mutable KeyState inside a selected profile.
+std::atomic<int> g_activeProfile{-1};
+
+// Hybrid profiles deliberately have no WH_KEYBOARD_LL hook while they
+// are active. The flag is changed by the foreground watcher and acted on by the
+// worker's message thread, which is the thread that owns the hook callback.
+std::atomic<bool> g_keyboardHookWanted{false};
+
+void UpdateKeyboardHook();
 
 bool g_debug = false;
 
@@ -329,6 +348,26 @@ bool MatchesTarget(const std::wstring& fileName, const std::wstring& target)
     }
 
     return EqualsIgnoreCase(WithoutExtension(fileName), WithoutExtension(target));
+}
+
+// Windows paths are case-insensitive. QueryFullProcessImageNameW normally uses
+// backslashes, but accepting forward slashes too makes manually written profiles
+// behave exactly like paths that came from the interface.
+bool MatchesPath(const std::wstring& imagePath, std::wstring targetPath)
+{
+    std::replace(targetPath.begin(), targetPath.end(), L'/', L'\\');
+    std::wstring normalImagePath = imagePath;
+    std::replace(normalImagePath.begin(), normalImagePath.end(), L'/', L'\\');
+    return EqualsIgnoreCase(normalImagePath, targetPath);
+}
+
+// A path-bearing profile must match that exact executable. Legacy profiles did
+// not record a path, so they retain the historical process-name fallback.
+bool MatchesProfile(const std::wstring& imageName, const std::wstring& imagePath, const Profile& profile)
+{
+    return profile.targetPath.empty()
+        ? MatchesTarget(imageName, profile.target)
+        : MatchesPath(imagePath, profile.targetPath);
 }
 
 // ------------------------------------------------------------ key injection
@@ -527,6 +566,84 @@ void HandleKey(Profile& profile, WORD scanCode, bool down)
     }
 }
 
+// Hybrid filters its own synthetic events out of Raw Input, so this restoration
+// cannot be mistaken for a real press. A single synthetic keydown is therefore
+// the same clean restoration used by Release.
+void RestoreHybridKey(KeyState& state)
+{
+    InjectKey(state, true);
+}
+
+void HandleHybridKey(Profile& profile, WORD scanCode, bool down)
+{
+    auto stateIt = profile.states.find(scanCode);
+    if (stateIt == profile.states.end())
+    {
+        return;
+    }
+
+    KeyState& state = stateIt->second;
+    const auto opponentsIt = profile.opponents.find(scanCode);
+    if (opponentsIt == profile.opponents.end())
+    {
+        return;
+    }
+
+    if (down)
+    {
+        if (state.held)
+        {
+            return;
+        }
+
+        state.held = true;
+        for (const WORD opponentScan : opponentsIt->second)
+        {
+            auto opponentIt = profile.states.find(opponentScan);
+            if (opponentIt == profile.states.end())
+            {
+                continue;
+            }
+
+            KeyState& opponent = opponentIt->second;
+            if (opponent.held && opponent.scriptDown)
+            {
+                opponent.scriptDown = false;
+                InjectKey(opponent, false);
+                Log(L"compat press %u -> release opponent %u", state.scan, opponent.scan);
+            }
+        }
+
+        state.scriptDown = true;
+        return;
+    }
+
+    if (!state.held)
+    {
+        return;
+    }
+
+    state.held = false;
+    state.scriptDown = false;
+
+    for (const WORD opponentScan : opponentsIt->second)
+    {
+        auto opponentIt = profile.states.find(opponentScan);
+        if (opponentIt == profile.states.end())
+        {
+            continue;
+        }
+
+        KeyState& opponent = opponentIt->second;
+        if (opponent.held && !opponent.scriptDown)
+        {
+            opponent.scriptDown = true;
+            RestoreHybridKey(opponent);
+            Log(L"compat release %u -> restore opponent %u", state.scan, opponent.scan);
+        }
+    }
+}
+
 // Delivery where the engine owns the stream: the physical press is held back and
 // replaced by an injected one, so the game only ever sees synthetic events.
 //
@@ -693,7 +810,7 @@ ForegroundInfo DescribeForeground()
     // Which profile, if any, this matches.
     for (size_t index = 0; index < g_profiles.size(); ++index)
     {
-        if (MatchesTarget(info.imageName, g_profiles[index].target))
+        if (MatchesProfile(info.imageName, info.imagePath, g_profiles[index]))
         {
             info.matchIndex = static_cast<int>(index);
             break;
@@ -712,12 +829,13 @@ int FindActiveProfile()
 
 Profile* ActiveProfile()
 {
-    if (g_activeProfile < 0)
+    const int index = g_activeProfile.load(std::memory_order_acquire);
+    if (index < 0)
     {
         return nullptr;
     }
 
-    return &g_profiles[g_activeProfile];
+    return &g_profiles[index];
 }
 
 // Guards the engine state, because the foreground is now checked from two
@@ -730,11 +848,18 @@ std::mutex g_stateMutex;
 // foreground polling thread waits on it too.
 HANDLE g_shutdownEvent = nullptr;
 
+constexpr UINT kUpdateKeyboardHookMessage = WM_APP + 41;
+
 EngineMode ParseModeName(const std::wstring& name)
 {
     if (EqualsIgnoreCase(name, L"blocking"))
     {
         return EngineMode::Blocking;
+    }
+
+    if (EqualsIgnoreCase(name, L"compatibility") || EqualsIgnoreCase(name, L"hybrid"))
+    {
+        return EngineMode::Hybrid;
     }
 
     return EngineMode::Release;
@@ -745,6 +870,7 @@ const wchar_t* ModeName(EngineMode mode)
     switch (mode)
     {
     case EngineMode::Blocking: return L"blocking";
+    case EngineMode::Hybrid: return L"hybrid";
     default: return L"release";
     }
 }
@@ -789,7 +915,7 @@ void SwitchProfile(int next)
 {
     std::lock_guard<std::mutex> lock(g_stateMutex);
 
-    if (next == g_activeProfile)
+    if (next == g_activeProfile.load(std::memory_order_relaxed))
     {
         return;
     }
@@ -801,18 +927,19 @@ void SwitchProfile(int next)
         ResetAll(*current);
     }
 
-    g_activeProfile = next;
+    g_activeProfile.store(next, std::memory_order_release);
 
     if (Profile* entered = ActiveProfile())
     {
         // Entering a game: keys may already be held from before.
         ResyncStates(*entered);
 
-        Log(L"ARMED      \"%s\"  method=%s  keys=%zu  target=\"%s\"",
+        Log(L"ARMED      \"%s\"  method=%s  keys=%zu  target=\"%s\"  path=%s",
             entered->target.c_str(),
             ModeName(entered->mode),
             entered->managedScanCodes.size(),
-            entered->target.c_str());
+            entered->target.c_str(),
+            entered->targetPath.empty() ? L"(legacy name match)" : entered->targetPath.c_str());
     }
     else
     {
@@ -836,10 +963,36 @@ void SwitchProfile(int next)
             std::wstring known;
             for (const auto& profile : g_profiles)
             {
-                known += L"\"" + profile.target + L"\" ";
+                known += L"\"" + profile.target + L"\"";
+                if (!profile.targetPath.empty())
+                {
+                    known += L" @ \"" + profile.targetPath + L"\"";
+                }
+                known += L" ";
             }
 
             Log(L"%-22s configured targets: %s", L"NOT-ARMED", known.c_str());
+        }
+    }
+
+    // A Hybrid profile uses WM_INPUT and must not coexist with the
+    // global low-level hook. A normal release or blocking profile still needs
+    // that hook for repeat suppression or event replacement respectively.
+    const Profile* active = ActiveProfile();
+    g_keyboardHookWanted.store(active != nullptr && active->mode != EngineMode::Hybrid,
+                               std::memory_order_release);
+
+    // Foreground notifications and the polling thread may call this off the
+    // message thread. Hook installation is therefore deferred to its owner.
+    if (g_mainThreadId != 0)
+    {
+        if (GetCurrentThreadId() == g_mainThreadId)
+        {
+            UpdateKeyboardHook();
+        }
+        else
+        {
+            PostThreadMessageW(g_mainThreadId, kUpdateKeyboardHookMessage, 0, 0);
         }
     }
 }
@@ -906,7 +1059,7 @@ void ForegroundPollLoop()
                 g_managedEventCount,
                 g_busyEventCount,
                 sinceLastEvent,
-                g_activeProfile);
+                g_activeProfile.load(std::memory_order_relaxed));
 
             lastCount = total;
         }
@@ -929,11 +1082,6 @@ LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
     }
 
     // Only real hardware drives the engine; synthetic events are left alone.
-    //
-    // The signature separates the two kinds. An event of ours is expected and can be
-    // accounted for; a foreign injection belongs to another program and is none of our
-    // business either way, but the difference is worth knowing when a game behaves as
-    // though a key it never received was pressed.
     if ((data->flags & LLKHF_INJECTED) != 0)
     {
         const bool ours = data->dwExtraInfo == kOwnTag;
@@ -968,6 +1116,9 @@ LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
         return CallNextHookEx(g_hook, nCode, wParam, lParam);
     }
 
+    const WORD baseScan = static_cast<WORD>(data->scanCode);
+    const bool extended = (data->flags & LLKHF_EXTENDED) != 0;
+    const WORD keyId = static_cast<WORD>(baseScan | (extended ? kExtendedBit : 0));
 
     // Never query foreground windows or open processes from this callback.
     //
@@ -1019,13 +1170,6 @@ LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
         return CallNextHookEx(g_hook, nCode, wParam, lParam);
     }
 
-    // A key is identified by scan code plus the E0 flag the event reports, not by
-    // a table guess. That is what keeps right Ctrl apart from left Ctrl and the
-    // keypad's 0 apart from Insert.
-    const WORD baseScan = static_cast<WORD>(data->scanCode);
-    const bool extended = (data->flags & LLKHF_EXTENDED) != 0;
-    const WORD keyId = static_cast<WORD>(baseScan | (extended ? kExtendedBit : 0));
-
     // Prefer the identity including the flag; fall back to the bare scan code so
     // a profile written before this distinction existed still matches.
     auto stateIt = profile->states.find(keyId);
@@ -1065,7 +1209,15 @@ LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
     state.vk = static_cast<WORD>(data->vkCode);
     state.extended = extended;
 
-    if (profile->mode != EngineMode::Release)
+    if (profile->mode == EngineMode::Hybrid)
+    {
+        // The hook can still be in the process of being removed when focus
+        // changes. Hybrid state belongs exclusively to Raw Input, so this
+        // transitional callback must never act on it.
+        return CallNextHookEx(g_hook, nCode, wParam, lParam);
+    }
+
+    if (profile->mode == EngineMode::Blocking)
     {
         // The physical event never reaches the system; the engine supplies the
         // replacement instead, so the game only ever sees injected input.
@@ -1086,6 +1238,165 @@ LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
     // Every other event, including every keyup and every keydown that starts
     // a new press, reaches the system untouched.
     return CallNextHookEx(g_hook, nCode, wParam, lParam);
+}
+
+// ---------------------------------------------------------------- raw input
+
+// Handles the Hybrid method. Raw Input observes device events without joining
+// the system-wide low-level hook chain, so macro applications retain their
+// normal hook order and timing.
+void HandleRawKeyboardInput(const RAWKEYBOARD& keyboard)
+{
+    // Raw Input also receives the events we create through SendInput. They carry
+    // the low 32 bits of kOwnTag in ExtraInformation. Treating our synthetic
+    // keyup as a physical release cleared (for example) D immediately after A
+    // pressed it, leaving nothing to restore when A was released.
+    if (keyboard.ExtraInformation == static_cast<ULONG>(kOwnTag))
+    {
+        return;
+    }
+
+    // VK_PACKET and a zero scan code do not represent a normal physical key.
+    if (keyboard.VKey == 0xFF || keyboard.MakeCode == 0)
+    {
+        return;
+    }
+
+    const bool down = (keyboard.Flags & RI_KEY_BREAK) == 0;
+    const WORD baseScan = keyboard.MakeCode;
+    const bool extended = (keyboard.Flags & (RI_KEY_E0 | RI_KEY_E1)) != 0;
+    const WORD keyId = static_cast<WORD>(baseScan | (extended ? kExtendedBit : 0));
+
+    const int candidateIndex = g_activeProfile.load(std::memory_order_acquire);
+    if (candidateIndex < 0 || candidateIndex >= static_cast<int>(g_profiles.size()))
+    {
+        return;
+    }
+
+    const Profile& candidate = g_profiles[candidateIndex];
+    if (candidate.mode != EngineMode::Hybrid ||
+        (!candidate.states.contains(keyId) && !candidate.states.contains(baseScan)))
+    {
+        return;
+    }
+
+    std::unique_lock<std::mutex> lock(g_stateMutex, std::try_to_lock);
+    if (!lock.owns_lock())
+    {
+        return;
+    }
+
+    Profile* profile = ActiveProfile();
+    if (profile == nullptr || profile->mode != EngineMode::Hybrid)
+    {
+        return;
+    }
+
+    auto stateIt = profile->states.find(keyId);
+    if (stateIt == profile->states.end())
+    {
+        stateIt = profile->states.find(baseScan);
+    }
+
+    if (stateIt == profile->states.end())
+    {
+        return;
+    }
+
+    const WORD key = stateIt->first;
+    KeyState& state = stateIt->second;
+    state.scan = baseScan;
+    state.vk = static_cast<WORD>(keyboard.VKey);
+    state.extended = extended;
+
+    // Raw Input owns state changes. A repeat of a direction currently released
+    // for SOCD gets another synthetic release; it never turns into SnapHook
+    // state and no low-level hook is needed to filter it.
+    if (down && state.held)
+    {
+        if (!state.scriptDown)
+        {
+            InjectKey(state, false);
+        }
+        return;
+    }
+
+    HandleHybridKey(*profile, key, down);
+}
+
+LRESULT CALLBACK RawInputWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_INPUT)
+    {
+        UINT bytes = sizeof(RAWINPUT);
+        RAWINPUT input{};
+        if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, &input, &bytes,
+                            sizeof(RAWINPUTHEADER)) != static_cast<UINT>(-1) &&
+            input.header.dwType == RIM_TYPEKEYBOARD)
+        {
+            HandleRawKeyboardInput(input.data.keyboard);
+        }
+        return 0;
+    }
+
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+bool CreateRawInputWindow()
+{
+    constexpr wchar_t kRawInputClass[] = L"SnapHookRawInputWindow";
+    WNDCLASSW windowClass{};
+    windowClass.hInstance = g_instance;
+    windowClass.lpszClassName = kRawInputClass;
+    windowClass.lpfnWndProc = RawInputWindowProc;
+
+    const ATOM atom = RegisterClassW(&windowClass);
+    if (atom == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+    {
+        Log(L"raw input window class failed  error=%lu", GetLastError());
+        return false;
+    }
+
+    g_rawInputWindow = CreateWindowExW(0, kRawInputClass, L"", 0,
+                                        0, 0, 0, 0, HWND_MESSAGE, nullptr, g_instance, nullptr);
+    if (g_rawInputWindow == nullptr)
+    {
+        Log(L"raw input window create failed  error=%lu", GetLastError());
+        return false;
+    }
+
+    RAWINPUTDEVICE device{};
+    device.usUsagePage = 0x01; // Generic Desktop Controls
+    device.usUsage = 0x06;     // Keyboard
+    device.dwFlags = RIDEV_INPUTSINK;
+    device.hwndTarget = g_rawInputWindow;
+    if (!RegisterRawInputDevices(&device, 1, sizeof(device)))
+    {
+        Log(L"raw input registration failed  error=%lu", GetLastError());
+        DestroyWindow(g_rawInputWindow);
+        g_rawInputWindow = nullptr;
+        return false;
+    }
+
+    return true;
+}
+
+void UpdateKeyboardHook()
+{
+    const bool wanted = g_keyboardHookWanted.load(std::memory_order_acquire);
+    if (wanted && g_hook == nullptr)
+    {
+        g_hook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardProc, g_instance, 0);
+        if (g_hook == nullptr)
+        {
+            Log(L"hook install failed  error=%lu", GetLastError());
+        }
+    }
+    else if (!wanted && g_hook != nullptr)
+    {
+        UnhookWindowsHookEx(g_hook);
+        g_hook = nullptr;
+    }
 }
 
 // ------------------------------------------------------------------ parsing
@@ -1155,10 +1466,12 @@ void ParsePairs(Profile& profile, const std::wstring& pairs)
 // Name of a delivery method, as it appears on the command line.
 // Parses one --profile argument.
 //
-// Two shapes are accepted, so a hand written command line stays terse:
+// Three shapes are accepted, so existing settings and hand-written command lines
+// remain usable:
 //
-//   "TslGame|release|30:32,17:31"   with an explicit method
-//   "TslGame|30:32,17:31"           method defaults to release
+//   "TslGame|C:\\Games\\GTA5.exe|release|30:32,17:31"  exact executable path
+//   "TslGame|release|30:32,17:31"                       legacy name + method
+//   "TslGame|30:32,17:31"                               legacy name + default method
 //
 // The target is the process name as the interface stores it, with or without
 // ".exe"; matching strips the extension either way.
@@ -1188,14 +1501,28 @@ void ParseProfile(const std::wstring& argument)
     profile.target = target;
     profile.mode = g_mode;
 
-    // An optional method token, recognised by not looking like a key pair.
+    // A modern profile has path|method|pairs. A Windows path cannot contain '|',
+    // so this delimiter is safe. An empty path is intentionally allowed to retain
+    // the legacy name-only behaviour.
     const size_t nextBar = rest.find(L'|');
     if (nextBar != std::wstring::npos)
     {
-        const std::wstring modeName = rest.substr(0, nextBar);
-        rest = rest.substr(nextBar + 1);
+        const std::wstring firstToken = rest.substr(0, nextBar);
+        const std::wstring afterFirst = rest.substr(nextBar + 1);
+        const size_t secondBar = afterFirst.find(L'|');
 
-        profile.mode = ParseModeName(modeName);
+        if (secondBar != std::wstring::npos)
+        {
+            profile.targetPath = firstToken;
+            profile.mode = ParseModeName(afterFirst.substr(0, secondBar));
+            rest = afterFirst.substr(secondBar + 1);
+        }
+        else
+        {
+            // The old target|method|pairs form.
+            profile.mode = ParseModeName(firstToken);
+            rest = afterFirst;
+        }
     }
 
     ParsePairs(profile, rest);
@@ -1207,8 +1534,6 @@ void ParseProfile(const std::wstring& argument)
 }
 
 // ------------------------------------------------------- unattended shutdown
-
-DWORD g_mainThreadId = 0;
 
 // Releases every key the engine could be holding.
 //
@@ -1271,7 +1596,7 @@ DWORD WINAPI ShutdownWatchdog(LPVOID)
 // ------------------------------------------------------------------ selftest
 
 // Drives the engine directly, with no hook and no real keyboard, and reports
-// the resulting key state. Run with:  HookingWorker.exe --selftest <log path>
+// the resulting key state. Run with:  SnapHookWorker.exe --selftest <log path>
 //
 // A pair A(30):D(32) is used. The expected transcript is:
 //   press A     -> A held, A seen by the game
@@ -1698,7 +2023,9 @@ int RunSharedKeySelfTest(const std::wstring& logPath)
     return failures == 0 ? 0 : 1;
 }
 
-// Verifies how a stored profile target is matched against a real image name.
+// Verifies both the legacy name match and the exact-path match used by modern
+// profiles. Exact paths prevent separate clients with the same executable name
+// from arming each other's key pairs.
 //
 // The interface stores what Windows calls the process ("cs2"), while
 // QueryFullProcessImageNameW returns the file ("cs2.exe"). Comparing them
@@ -1711,35 +2038,41 @@ int RunTargetSelfTest(const std::wstring& logPath)
     struct Case
     {
         const wchar_t* file;
+        const wchar_t* path;
         const wchar_t* target;
+        const wchar_t* targetPath;
         bool expected;
     };
 
     const Case cases[] =
     {
-        {L"TslGame.exe", L"TslGame", true},    // the shape the interface stores
-        {L"TslGame.exe", L"TslGame.exe", true}, // a manually entered full name
-        {L"cs2.exe", L"cs2", true},
-        {L"cs2.exe", L"CS2", true},             // case insensitive
-        {L"TslGame.exe", L"csgo", false},       // a different game
-        {L"cs2.exe", L"cs", false},             // prefix is not a match
-        {L"VALORANT-Win64-Shipping.exe", L"VALORANT-Win64-Shipping", true},
-        {L"javaw.exe", L"javaw", true},         // a name that already ends in a letter
+        {L"TslGame.exe", L"C:\\Games\\PUBG\\TslGame.exe", L"TslGame", L"", true},
+        {L"TslGame.exe", L"C:\\Games\\PUBG\\TslGame.exe", L"TslGame.exe", L"", true},
+        {L"cs2.exe", L"D:\\Steam\\cs2.exe", L"CS2", L"", true},
+        {L"TslGame.exe", L"C:\\Games\\PUBG\\TslGame.exe", L"csgo", L"", false},
+        {L"cs2.exe", L"D:\\Steam\\cs2.exe", L"cs", L"", false},
+        {L"GTA5.exe", L"C:\\ClientA\\GTA5.exe", L"GTA5", L"C:\\ClientA\\GTA5.exe", true},
+        {L"GTA5.exe", L"C:\\ClientB\\GTA5.exe", L"GTA5", L"C:\\ClientA\\GTA5.exe", false},
+        {L"GTA5.exe", L"C:\\ClientA\\GTA5.exe", L"GTA5", L"c:/clienta/gta5.exe", true},
     };
 
     int failures = 0;
 
     for (const Case& test : cases)
     {
-        const bool actual = MatchesTarget(test.file, test.target);
+        Profile profile;
+        profile.target = test.target;
+        profile.targetPath = test.targetPath;
+        const bool actual = MatchesProfile(test.file, test.path, profile);
         const bool ok = actual == test.expected;
         if (!ok)
         {
             failures++;
         }
 
-        Log(L"%s  \"%s\" vs \"%s\" -> %d (expected %d)",
-            ok ? L"pass" : L"FAIL", test.file, test.target, actual ? 1 : 0, test.expected ? 1 : 0);
+        Log(L"%s  file=\"%s\" path=\"%s\" vs target=\"%s\" targetPath=\"%s\" -> %d (expected %d)",
+            ok ? L"pass" : L"FAIL", test.file, test.path, test.target, test.targetPath,
+            actual ? 1 : 0, test.expected ? 1 : 0);
     }
 
     Log(L"target selftest: %zu cases, %d failed", std::size(cases), failures);
@@ -1879,7 +2212,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
             profile.target.c_str(), ModeName(profile.mode), profile.managedScanCodes.size());
     }
 
-    g_activeProfile = -1;
+    g_instance = instance;
+    g_mainThreadId = GetCurrentThreadId();
+
+    // PostThreadMessage is used to change the low-level hook from the foreground
+    // watcher. Make this thread's queue exist before any watcher can post to it.
+    MSG queued{};
+    PeekMessageW(&queued, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+
+    if (!CreateRawInputWindow())
+    {
+        return 1;
+    }
+
+    g_activeProfile.store(-1, std::memory_order_release);
 
     // Reported before the first switch, because SwitchProfile stays quiet when the
     // state does not change and both start at "nothing".
@@ -1900,30 +2246,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
         0,
         WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
-    g_hook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardProc, instance, 0);
-    if (!g_hook)
-    {
-        Log(L"hook install failed  error=%lu", GetLastError());
-        if (g_shutdownEvent != nullptr)
-        {
-            CloseHandle(g_shutdownEvent);
-        }
-        if (g_log)
-        {
-            std::fclose(g_log);
-        }
-        return 1;
-    }
-
     // A named event lets the interface ask for a clean stop, so keys are released
-// before the process ends.
+    // before the process ends.
     if (g_shutdownEventName.empty())
     {
-        g_shutdownEventName = L"Local\\HookingWorkerStop";
+        g_shutdownEventName = L"Local\\SnapHookWorkerStop";
     }
 
     g_shutdownEvent = CreateEventW(nullptr, TRUE, FALSE, g_shutdownEventName.c_str());
-    g_mainThreadId = GetCurrentThreadId();
 
     if (g_shutdownEvent != nullptr)
     {
@@ -1934,16 +2264,29 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0)
     {
+        if (message.message == kUpdateKeyboardHookMessage)
+        {
+            UpdateKeyboardHook();
+            continue;
+        }
+
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
 
     ReleaseEverythingHeld();
 
-    UnhookWindowsHookEx(g_hook);
+    if (g_hook)
+    {
+        UnhookWindowsHookEx(g_hook);
+    }
     if (g_foregroundHook)
     {
         UnhookWinEvent(g_foregroundHook);
+    }
+    if (g_rawInputWindow)
+    {
+        DestroyWindow(g_rawInputWindow);
     }
 
     Log(L"worker stop");

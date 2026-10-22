@@ -1,9 +1,9 @@
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Hooking.Models;
+using SnapHook.Models;
 
-namespace Hooking.Services;
+namespace SnapHook.Services;
 
 public sealed class SettingsStore(AppPaths paths)
 {
@@ -29,13 +29,23 @@ public sealed class SettingsStore(AppPaths paths)
 
         try
         {
-            var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(paths.SettingsFile), Options);
+            var rawSettings = File.ReadAllText(paths.SettingsFile);
+            var migratedSettings = rawSettings
+                .Replace("\"HookingEnabled\"", "\"SnapHookEnabled\"", StringComparison.Ordinal)
+                .Replace("\"SnapTapEnabled\"", "\"SnapHookEnabled\"", StringComparison.Ordinal);
+            var settings = JsonSerializer.Deserialize<AppSettings>(migratedSettings, Options);
             if (settings is null)
             {
                 return new AppSettings();
             }
 
             Normalize(settings);
+
+            if (!string.Equals(rawSettings, migratedSettings, StringComparison.Ordinal))
+            {
+                File.WriteAllText(paths.SettingsFile, migratedSettings);
+            }
+
             return settings;
         }
         catch (Exception exception)

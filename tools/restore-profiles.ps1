@@ -8,7 +8,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$root = Join-Path $env:APPDATA 'Hooking'
+$root = Join-Path $env:APPDATA 'SnapHook'
 $current = Join-Path $root 'settings.json'
 $backup = Join-Path $root 'settings.json.invalid'
 

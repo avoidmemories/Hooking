@@ -12,16 +12,16 @@ using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using Hardcodet.Wpf.TaskbarNotification;
-using Hooking.Models;
-using Hooking.Services;
+using SnapHook.Models;
+using SnapHook.Services;
 
-namespace Hooking;
+namespace SnapHook;
 
 public partial class MainWindow : Window
 {
     private readonly AppPaths _paths = new();
     private readonly SettingsStore _store;
-    private readonly HookingWorkerService _worker;
+    private readonly SnapHookWorkerService _worker;
 
     /// <summary>The notification area icon, declared in the window resources.</summary>
     private readonly TaskbarIcon _tray;
@@ -79,6 +79,9 @@ public partial class MainWindow : Window
     private readonly SolidColorBrush _blockingLabelBrush =
         new((Color)ColorConverter.ConvertFromString("#8A8A8A"));
 
+    private readonly SolidColorBrush _hybridLabelBrush =
+        new((Color)ColorConverter.ConvertFromString("#8A8A8A"));
+
     /// <summary>Row whose highlight is parked while another page is showing.</summary>
     private ProfileRow? _suspendedSelection;
 
@@ -130,10 +133,10 @@ public partial class MainWindow : Window
         InitializeComponent();
 
         _store = new SettingsStore(_paths);
-        _worker = new HookingWorkerService(_paths);
+        _worker = new SnapHookWorkerService(_paths);
         _settings = _store.Load();
         _tray = (TaskbarIcon)FindResource("TrayIcon");
-        _tray.IconSource = _settings.HookingEnabled ? _enabledTrayIcon : _disabledTrayIcon;
+        _tray.IconSource = _settings.SnapHookEnabled ? _enabledTrayIcon : _disabledTrayIcon;
 
         ConfigureWindowChrome();
         Closing += Window_Closing;
@@ -308,11 +311,11 @@ public partial class MainWindow : Window
     {
         if (sender is ContextMenu menu && menu.Items.Count > 0 && menu.Items[0] is MenuItem toggle)
         {
-            toggle.Header = _settings.HookingEnabled ? "Disable" : "Enable";
+            toggle.Header = _settings.SnapHookEnabled ? "Disable" : "Enable";
         }
     }
 
-    private void TrayToggle_Click(object sender, RoutedEventArgs e) => SetEngineEnabled(!_settings.HookingEnabled);
+    private void TrayToggle_Click(object sender, RoutedEventArgs e) => SetEngineEnabled(!_settings.SnapHookEnabled);
 
     private void TrayExit_Click(object sender, RoutedEventArgs e)
     {
@@ -1575,6 +1578,8 @@ public partial class MainWindow : Window
 
     private void ModeBlocking_Click(object sender, RoutedEventArgs e) => SetMode(EngineMode.Blocking);
 
+    private void ModeHybrid_Click(object sender, RoutedEventArgs e) => SetMode(EngineMode.Hybrid);
+
     /// <summary>
     /// Changes the input method of the selected game only. The choice belongs to
     /// the profile, so switching it here never affects another game.
@@ -1625,6 +1630,7 @@ public partial class MainWindow : Window
         var mode = _selected?.Mode ?? EngineMode.Release;
         ModeReleaseSegment.IsChecked = mode == EngineMode.Release;
         ModeBlockingSegment.IsChecked = mode == EngineMode.Blocking;
+        ModeHybridSegment.IsChecked = mode == EngineMode.Hybrid;
 
         _updatingMode = false;
 
@@ -1669,7 +1675,8 @@ public partial class MainWindow : Window
         foreach (var (segment, brush, isActive) in new[]
                  {
                      (ModeReleaseSegment, _releaseLabelBrush, mode == EngineMode.Release),
-                     (ModeBlockingSegment, _blockingLabelBrush, mode == EngineMode.Blocking)
+                     (ModeBlockingSegment, _blockingLabelBrush, mode == EngineMode.Blocking),
+                     (ModeHybridSegment, _hybridLabelBrush, mode == EngineMode.Hybrid)
                  })
         {
             var target = isActive ? active : resting;
@@ -1722,7 +1729,11 @@ public partial class MainWindow : Window
     /// </summary>
     private void UpdateSegmentBacking(bool animate = true)
     {
-        var target = ModeBlockingSegment.IsChecked == true ? ModeBlockingSegment : ModeReleaseSegment;
+        var target = ModeBlockingSegment.IsChecked == true
+            ? ModeBlockingSegment
+            : ModeHybridSegment.IsChecked == true
+                ? ModeHybridSegment
+                : ModeReleaseSegment;
         if (target.ActualWidth <= 0 || SegmentBacking.Parent is not UIElement parent)
         {
             return;
@@ -2314,7 +2325,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        SetEngineEnabled(!_settings.HookingEnabled);
+        SetEngineEnabled(!_settings.SnapHookEnabled);
     }
 
     /// <summary>
@@ -2323,7 +2334,7 @@ public partial class MainWindow : Window
     /// </summary>
     private void SetEngineEnabled(bool enabled)
     {
-        _settings.HookingEnabled = enabled;
+        _settings.SnapHookEnabled = enabled;
         SaveSettings();
 
         // The worker is restarted from the current settings, which is what actually
@@ -2341,7 +2352,7 @@ public partial class MainWindow : Window
 
     private void UpdateMasterSwitch()
     {
-        var on = _settings.HookingEnabled;
+        var on = _settings.SnapHookEnabled;
 
         // The orbiting light is created once, the first time the switch is
         // painted, and then only started or stopped.
@@ -2377,7 +2388,7 @@ public partial class MainWindow : Window
     /// </summary>
     private void AnimateSwitchFlash()
     {
-        var on = _settings.HookingEnabled;
+        var on = _settings.SnapHookEnabled;
 
         // Two stops rather than a jump: up to the lit shade, then down to rest.
         var lit = on ? Color.FromRgb(0x3A, 0x3A, 0x3A) : Color.FromRgb(0x2A, 0x2A, 0x2A);

@@ -4,7 +4,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Shapes;
 
-namespace Hooking.Services;
+namespace SnapHook.Services;
 
 /// <summary>
 /// A point of light travelling around the edge of a rounded rectangle, with a

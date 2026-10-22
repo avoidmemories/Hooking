@@ -2,9 +2,9 @@ using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
-using Hooking.Services;
+using SnapHook.Services;
 
-namespace Hooking;
+namespace SnapHook;
 
 /// <summary>
 /// Confirms the removal of a game profile.

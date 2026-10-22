@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-namespace Hooking.Services;
+namespace SnapHook.Services;
 
 /// <summary>
 /// Minimal key injection used by the interface side, for one job only: making

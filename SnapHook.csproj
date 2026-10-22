@@ -6,18 +6,18 @@
     <UseWPF>true</UseWPF>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <AssemblyName>Hooking</AssemblyName>
-    <RootNamespace>Hooking</RootNamespace>
+    <AssemblyName>SnapHook</AssemblyName>
+    <RootNamespace>SnapHook</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <ApplicationIcon>Assets\Hooking.ico</ApplicationIcon>
+    <ApplicationIcon>Assets\SnapHook.ico</ApplicationIcon>
     <RebuildNativeWorker Condition="'$(RebuildNativeWorker)' == ''">false</RebuildNativeWorker>
   </PropertyGroup>
 
   <ItemGroup>
     <!-- The native engine is a program file, not per-user runtime data. The Link
-         puts it beside Hooking.exe both in bin and in the publish directory. -->
-    <Content Include="Native\HookingWorker.exe">
-      <Link>HookingWorker.exe</Link>
+         puts it beside SnapHook.exe both in bin and in the publish directory. -->
+    <Content Include="Native\SnapHookWorker.exe">
+      <Link>SnapHookWorker.exe</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
@@ -25,10 +25,10 @@
 
   <ItemGroup>
     <!-- Main application icon plus compact, state-specific tray icons. -->
-    <Resource Include="Assets\Hooking.png" />
+    <Resource Include="Assets\SnapHook.png" />
     <Resource Include="Assets\TrayEnabled.png" />
     <Resource Include="Assets\TrayDisabled.png" />
-    <Resource Include="Assets\Hooking.ico" />
+    <Resource Include="Assets\SnapHook.ico" />
   </ItemGroup>
 
   <ItemGroup>
@@ -40,14 +40,14 @@
        newer than the binary (or the binary is missing), and skip it otherwise.
        Without this the embedded worker would quietly go stale after an edit.
        Force a rebuild with -p:RebuildNativeWorker=true. -->
-  <Target Name="BuildHookingWorker" BeforeTargets="BeforeBuild"
-          Inputs="$(MSBuildProjectDirectory)\Native\HookingWorker.cpp"
-          Outputs="$(MSBuildProjectDirectory)\Native\HookingWorker.exe"
+  <Target Name="BuildSnapHookWorker" BeforeTargets="BeforeBuild"
+          Inputs="$(MSBuildProjectDirectory)\Native\SnapHookWorker.cpp"
+          Outputs="$(MSBuildProjectDirectory)\Native\SnapHookWorker.exe"
           Condition="'$(RebuildNativeWorker)' != 'true'">
     <Exec Command="&quot;$(MSBuildProjectDirectory)\Native\build-worker.cmd&quot; &quot;$(MSBuildProjectDirectory)\Native&quot; &quot;$(MSBuildProjectDirectory)\Native&quot;" />
   </Target>
 
-  <Target Name="ForceRebuildHookingWorker" BeforeTargets="BeforeBuild"
+  <Target Name="ForceRebuildSnapHookWorker" BeforeTargets="BeforeBuild"
           Condition="'$(RebuildNativeWorker)' == 'true'">
     <Exec Command="&quot;$(MSBuildProjectDirectory)\Native\build-worker.cmd&quot; &quot;$(MSBuildProjectDirectory)\Native&quot; &quot;$(MSBuildProjectDirectory)\Native&quot;" />
   </Target>
