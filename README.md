@@ -1,6 +1,10 @@
 # SnapHook
 
-SOCD: Snappy Tappy
+**SOCD: Snappy Tappy**
+
+<p align="center">
+  <img src="https://i.imgur.com/IyBBuGi.png" alt="Preview" width="600">
+</p>
 
 ---
 
