@@ -1,7 +1,6 @@
 <Window x:Class="SnapHook.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:tb="http://www.hardcodet.net/taskbar"
         Title="SnapHook"
         Width="1100" Height="600"
         MinWidth="1100" MinHeight="600"
@@ -18,23 +17,6 @@
         TextOptions.TextRenderingMode="ClearType"
         FontFamily="Segoe UI"
         SourceInitialized="Window_SourceInitialized">
-
-    <Window.Resources>
-        <!-- Notification area icon. A left click brings the window back; a right click
-             opens the menu. The menu label follows the engine state when it opens. -->
-        <tb:TaskbarIcon x:Key="TrayIcon"
-                        IconSource="pack://application:,,,/Assets/TrayEnabled.png"
-                        ToolTipText="SnapHook"
-                        TrayLeftMouseUp="Tray_LeftMouseUp">
-            <tb:TaskbarIcon.ContextMenu>
-                <ContextMenu Opened="TrayMenu_Opened">
-                    <MenuItem Header="Enable" Click="TrayToggle_Click" />
-                    <Separator />
-                    <MenuItem Header="Exit" Click="TrayExit_Click" />
-                </ContextMenu>
-            </tb:TaskbarIcon.ContextMenu>
-        </tb:TaskbarIcon>
-    </Window.Resources>
 
     <Grid>
         <!-- The frame fills the window.
@@ -296,14 +278,14 @@
                             <Border x:Name="MasterSwitch" Grid.Column="1"
                                     Background="{StaticResource CellBrush}"
                                     BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1"
-                                    CornerRadius="{StaticResource ControlRadius}" Padding="12,0" Height="32"
+                                    CornerRadius="{StaticResource ControlRadius}" Padding="8,0,12,0" Height="32"
                                     HorizontalAlignment="Right"
                                     Cursor="Hand"
                                     MouseLeftButtonDown="MasterSwitch_MouseDown"
                                     >
                                 <Grid>
                                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                        <TextBlock x:Name="MasterSwitchLabel" Text="DISABLED"
+                                        <TextBlock x:Name="MasterSwitchLabel" Text="INACTIVE"
                                                    Foreground="{StaticResource SubTextBrush}"
                                                    FontSize="12" FontWeight="Bold"
                                                    Width="66" TextAlignment="Center"
@@ -384,13 +366,13 @@
                                                              Style="{StaticResource SegmentToggle}"
                                                              GroupName="InputMethod" Checked="ModeRelease_Click"
                                                              ToolTip="Your keys always reach the game. Safest." />
+                                                <RadioButton x:Name="ModeHybridSegment" Content="Hybrid"
+                                                             Style="{StaticResource SegmentToggle}"
+                                                             GroupName="InputMethod" Checked="ModeHybrid_Click" />
                                                 <RadioButton x:Name="ModeBlockingSegment" Content="Blocking"
                                                              Style="{StaticResource SegmentToggle}"
                                                              GroupName="InputMethod" Checked="ModeBlocking_Click"
                                                              ToolTip="Physical keys are replaced by injected ones." />
-                                                <RadioButton x:Name="ModeHybridSegment" Content="Hybrid"
-                                                             Style="{StaticResource SegmentToggle}"
-                                                             GroupName="InputMethod" Checked="ModeHybrid_Click" />
                                             </StackPanel>
                                         </Grid>
                                     </Border>

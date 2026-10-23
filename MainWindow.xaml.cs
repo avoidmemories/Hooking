@@ -9,9 +9,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
-using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
-using Hardcodet.Wpf.TaskbarNotification;
 using SnapHook.Models;
 using SnapHook.Services;
 
@@ -23,10 +21,8 @@ public partial class MainWindow : Window
     private readonly SettingsStore _store;
     private readonly SnapHookWorkerService _worker;
 
-    /// <summary>The notification area icon, declared in the window resources.</summary>
-    private readonly TaskbarIcon _tray;
-    private readonly ImageSource _enabledTrayIcon = LoadTrayIcon("TrayEnabled.png");
-    private readonly ImageSource _disabledTrayIcon = LoadTrayIcon("TrayDisabled.png");
+    /// <summary>The native notification-area icon and its system menu.</summary>
+    private readonly TrayIconService _tray;
 
     /// <summary>
     /// Closing the window only hides it, so the engine keeps running in the tray.
@@ -135,8 +131,12 @@ public partial class MainWindow : Window
         _store = new SettingsStore(_paths);
         _worker = new SnapHookWorkerService(_paths);
         _settings = _store.Load();
-        _tray = (TaskbarIcon)FindResource("TrayIcon");
-        _tray.IconSource = _settings.SnapHookEnabled ? _enabledTrayIcon : _disabledTrayIcon;
+        _tray = new TrayIconService(
+            "SnapHook",
+            ShowFromTray,
+            () => SetEngineEnabled(!_settings.SnapHookEnabled),
+            ExitFromTray,
+            _settings.SnapHookEnabled);
 
         ConfigureWindowChrome();
         Closing += Window_Closing;
@@ -301,23 +301,7 @@ public partial class MainWindow : Window
     /// </summary>
     public void PrepareForExit() => _exitRequested = true;
 
-    private void Tray_LeftMouseUp(object sender, RoutedEventArgs e) => ShowFromTray();
-
-    /// <summary>
-    /// The first item of the tray menu follows the engine state each time the menu opens,
-    /// so it always offers the opposite of what is running.
-    /// </summary>
-    private void TrayMenu_Opened(object sender, RoutedEventArgs e)
-    {
-        if (sender is ContextMenu menu && menu.Items.Count > 0 && menu.Items[0] is MenuItem toggle)
-        {
-            toggle.Header = _settings.SnapHookEnabled ? "Disable" : "Enable";
-        }
-    }
-
-    private void TrayToggle_Click(object sender, RoutedEventArgs e) => SetEngineEnabled(!_settings.SnapHookEnabled);
-
-    private void TrayExit_Click(object sender, RoutedEventArgs e)
+    private void ExitFromTray()
     {
         _exitRequested = true;
         Close();
@@ -1629,8 +1613,8 @@ public partial class MainWindow : Window
 
         var mode = _selected?.Mode ?? EngineMode.Release;
         ModeReleaseSegment.IsChecked = mode == EngineMode.Release;
-        ModeBlockingSegment.IsChecked = mode == EngineMode.Blocking;
         ModeHybridSegment.IsChecked = mode == EngineMode.Hybrid;
+        ModeBlockingSegment.IsChecked = mode == EngineMode.Blocking;
 
         _updatingMode = false;
 
@@ -1675,8 +1659,8 @@ public partial class MainWindow : Window
         foreach (var (segment, brush, isActive) in new[]
                  {
                      (ModeReleaseSegment, _releaseLabelBrush, mode == EngineMode.Release),
-                     (ModeBlockingSegment, _blockingLabelBrush, mode == EngineMode.Blocking),
-                     (ModeHybridSegment, _hybridLabelBrush, mode == EngineMode.Hybrid)
+                     (ModeHybridSegment, _hybridLabelBrush, mode == EngineMode.Hybrid),
+                     (ModeBlockingSegment, _blockingLabelBrush, mode == EngineMode.Blocking)
                  })
         {
             var target = isActive ? active : resting;
@@ -1729,10 +1713,10 @@ public partial class MainWindow : Window
     /// </summary>
     private void UpdateSegmentBacking(bool animate = true)
     {
-        var target = ModeBlockingSegment.IsChecked == true
-            ? ModeBlockingSegment
-            : ModeHybridSegment.IsChecked == true
+        var target = ModeHybridSegment.IsChecked == true
                 ? ModeHybridSegment
+                : ModeBlockingSegment.IsChecked == true
+                    ? ModeBlockingSegment
                 : ModeReleaseSegment;
         if (target.ActualWidth <= 0 || SegmentBacking.Parent is not UIElement parent)
         {
@@ -2359,9 +2343,9 @@ public partial class MainWindow : Window
         _starEffect ??= StarBorderEffect.Attach(MasterSwitch);
 
         MasterToggle.IsChecked = on;
-        _tray.IconSource = on ? _enabledTrayIcon : _disabledTrayIcon;
+        _tray.SetActive(on);
         // A fixed width label, so the plate never resizes as the state changes.
-        MasterSwitchLabel.Text = on ? "ENABLED" : "DISABLED";
+        MasterSwitchLabel.Text = on ? "ACTIVE" : "INACTIVE";
 
         MasterSwitchLabel.Foreground = (Brush)FindResource(on ? "TextBrush" : "SubTextBrush");
         MasterSwitch.BorderBrush = (Brush)FindResource(on ? "TextBrush" : "BorderBrushSoft");
@@ -2400,22 +2384,6 @@ public partial class MainWindow : Window
         var settle = Motion.Color(rest, 420, EasingMode.EaseOut);
         settle.BeginTime = TimeSpan.FromMilliseconds(60);
         brush.BeginAnimation(SolidColorBrush.ColorProperty, settle);
-    }
-
-    /// <summary>
-    /// Loads a notification-area image from the application's compiled resources.
-    /// The image is frozen because the tray library holds it for the application's
-    /// lifetime and never needs to mutate it.
-    /// </summary>
-    private static ImageSource LoadTrayIcon(string assetName)
-    {
-        var image = new BitmapImage();
-        image.BeginInit();
-        image.UriSource = new Uri($"pack://application:,,,/Assets/{assetName}", UriKind.Absolute);
-        image.CacheOption = BitmapCacheOption.OnLoad;
-        image.EndInit();
-        image.Freeze();
-        return image;
     }
 
     /// <summary>
