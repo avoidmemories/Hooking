@@ -3,7 +3,7 @@
 **SOCD: Snappy Tappy**
 
 <p align="center">
-  <img src="https://i.imgur.com/sy9eEHF.gif" alt="Preview" width="600">
+  <img src="https://i.imgur.com/sy9eEHF.gif" alt="Preview" width="1000">
 </p>
 
 ---
