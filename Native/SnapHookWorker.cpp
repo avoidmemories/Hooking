@@ -42,7 +42,6 @@
 #include <functional>
 #include <cwchar>
 #include <cwctype>
-#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -172,6 +171,14 @@ HWND g_rawInputWindow = nullptr;
 HINSTANCE g_instance = nullptr;
 DWORD g_mainThreadId = 0;
 
+// All input state belongs to this thread. Raw Input and a low-level keyboard
+// hook installed by this thread are dispatched through its message queue too,
+// so profile changes can be serialized with physical key events instead of
+// contending for a lock.
+constexpr UINT kRefreshForegroundMessage = WM_APP + 41;
+constexpr UINT kReleaseAndQuitMessage = WM_APP + 42;
+constexpr UINT kRestoreBlockingMessage = WM_APP + 43;
+
 // Tick of the last event the hook saw, and how many it has seen in total.
 //
 // The count is what makes the heartbeat meaningful: a hook that is alive but idle
@@ -186,19 +193,22 @@ volatile long g_foreignEventCount = 0;
 volatile long g_unarmedEventCount = 0;
 volatile long g_managedEventCount = 0;
 volatile long g_unmanagedEventCount = 0;
-volatile long g_busyEventCount = 0;
 HWINEVENTHOOK g_foregroundHook = nullptr;
 
 std::vector<Profile> g_profiles;
-// Published separately from the state lock for the Hybrid Raw Input path. The
-// profiles vector is immutable after startup; the lock still protects every
-// mutable KeyState inside a selected profile.
+// The profile list is immutable after startup. Only the worker's message thread
+// selects an index and touches the corresponding KeyState objects.
 std::atomic<int> g_activeProfile{-1};
 
-// Hybrid profiles deliberately have no WH_KEYBOARD_LL hook while they
-// are active. The flag is changed by the foreground watcher and acted on by the
-// worker's message thread, which is the thread that owns the hook callback.
-std::atomic<bool> g_keyboardHookWanted{false};
+// Hybrid profiles deliberately have no WH_KEYBOARD_LL hook while active.
+// This flag is message-thread-only, just like the hook itself.
+bool g_keyboardHookWanted = false;
+
+// Background watcher threads never alter input state. They only request work
+// from the message thread and stop posting once shutdown begins.
+std::atomic<bool> g_shutdownRequested{false};
+std::atomic<bool> g_foregroundRefreshPosted{false};
+bool g_stopping = false;
 
 void UpdateKeyboardHook();
 
@@ -372,7 +382,14 @@ bool MatchesProfile(const std::wstring& imageName, const std::wstring& imagePath
 
 // ------------------------------------------------------------ key injection
 
-void InjectKey(const KeyState& state, bool down)
+using SendInputFunction = UINT(WINAPI*)(UINT, LPINPUT, int);
+SendInputFunction g_sendInput = ::SendInput;
+
+// Sends one synthetic event and reports whether Windows accepted it. This only
+// confirms delivery to the Windows input queue; a game may still choose not to
+// use injected input. The state machine must nevertheless not claim a change
+// that Windows rejected outright.
+bool InjectKey(const KeyState& state, bool down)
 {
     INPUT input{};
 
@@ -393,7 +410,27 @@ void InjectKey(const KeyState& state, bool down)
     // Our signature, so the hook can recognise this event on the way back.
     input.ki.dwExtraInfo = kOwnTag;
 
-    SendInput(1, &input, sizeof(INPUT));
+    return g_sendInput(1, &input, sizeof(INPUT)) == 1;
+}
+
+// Updates the state only after the synthetic transition has entered the Windows
+// input queue. Native physical transitions are recorded by their callers and do
+// not use this helper.
+bool SetInjectedKeyState(KeyState& state, bool down)
+{
+    if (state.scriptDown == down)
+    {
+        return true;
+    }
+
+    if (!InjectKey(state, down))
+    {
+        Log(L"inject failed  scan=%u  transition=%s", state.scan, down ? L"down" : L"up");
+        return false;
+    }
+
+    state.scriptDown = down;
+    return true;
 }
 
 // -------------------------------------------------------------- state sync
@@ -421,17 +458,19 @@ void ResyncStates(Profile& profile)
 
         if (state.held && !state.scriptDown)
         {
-            state.scriptDown = true;
-            InjectKey(state, true);
-            changed = true;
-            Log(L"resync   scan=%u -> down", state.scan);
+            if (SetInjectedKeyState(state, true))
+            {
+                changed = true;
+                Log(L"resync   scan=%u -> down", state.scan);
+            }
         }
         else if (!state.held && state.scriptDown)
         {
-            state.scriptDown = false;
-            InjectKey(state, false);
-            changed = true;
-            Log(L"resync   scan=%u -> up", state.scan);
+            if (SetInjectedKeyState(state, false))
+            {
+                changed = true;
+                Log(L"resync   scan=%u -> up", state.scan);
+            }
         }
     }
 
@@ -450,9 +489,10 @@ void RestoreSuppressedKeys(Profile& profile)
         KeyState& state = entry.second;
         if (state.held && !state.scriptDown)
         {
-            state.scriptDown = true;
-            InjectKey(state, true);
-            Log(L"restore  scan=%u", state.scan);
+            if (SetInjectedKeyState(state, true))
+            {
+                Log(L"restore  scan=%u", state.scan);
+            }
         }
     }
 }
@@ -475,7 +515,30 @@ enum class HookAction
     Swallow  // drop it
 };
 
-// An auto repeat of a key the engine has already released.
+// Whether another still-held key currently owns this key's pair. The fact that
+// scriptDown is false alone is not enough: a restoration may have been rejected
+// by Windows after the opposing key was already released.
+bool HasHeldOpponent(const Profile& profile, WORD scanCode)
+{
+    const auto opponentsIt = profile.opponents.find(scanCode);
+    if (opponentsIt == profile.opponents.end())
+    {
+        return false;
+    }
+
+    for (const WORD opponentScan : opponentsIt->second)
+    {
+        const auto opponentIt = profile.states.find(opponentScan);
+        if (opponentIt != profile.states.end() && opponentIt->second.held)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// An auto repeat of a key the engine has actually released for an opponent.
 //
 // While a key is physically held the keyboard keeps sending repeats, roughly
 // thirty per second. In release mode the physical keydown let
@@ -487,9 +550,9 @@ enum class HookAction
 // therefore safe in both directions. If the game honoured the injected release,
 // the key stays released. If the game dropped it, the key was already down and
 // nothing changes.
-bool IsSuppressedRepeat(const KeyState& state, bool down)
+bool IsSuppressedRepeat(const Profile& profile, WORD scanCode, const KeyState& state, bool down)
 {
-    return down && state.held && !state.scriptDown;
+    return down && state.held && !state.scriptDown && HasHeldOpponent(profile, scanCode);
 }
 
 void HandleKey(Profile& profile, WORD scanCode, bool down)
@@ -509,10 +572,15 @@ void HandleKey(Profile& profile, WORD scanCode, bool down)
 
     if (down)
     {
-        // A repeat of a key that is already held. The hook has already decided
-        // whether to deliver it; nothing to do here.
+        // If a previous restoration was rejected, the native repeat is the
+        // next real down transition the game receives. It repairs bookkeeping
+        // once no held opponent still needs this key suppressed.
         if (state.held)
         {
+            if (!state.scriptDown && !HasHeldOpponent(profile, scanCode))
+            {
+                state.scriptDown = true;
+            }
             return;
         }
 
@@ -529,9 +597,10 @@ void HandleKey(Profile& profile, WORD scanCode, bool down)
             KeyState& opponent = opponentIt->second;
             if (opponent.held && opponent.scriptDown)
             {
-                opponent.scriptDown = false;
-                InjectKey(opponent, false);
-                Log(L"press    %u -> release opponent %u", state.scan, opponent.scan);
+                if (SetInjectedKeyState(opponent, false))
+                {
+                    Log(L"press    %u -> release opponent %u", state.scan, opponent.scan);
+                }
             }
         }
 
@@ -556,11 +625,13 @@ void HandleKey(Profile& profile, WORD scanCode, bool down)
             }
 
             KeyState& opponent = opponentIt->second;
-            if (opponent.held && !opponent.scriptDown)
+            if (opponent.held && !opponent.scriptDown &&
+                !HasHeldOpponent(profile, opponentScan))
             {
-                opponent.scriptDown = true;
-                InjectKey(opponent, true);
-                Log(L"release  %u -> restore opponent %u", state.scan, opponent.scan);
+                if (SetInjectedKeyState(opponent, true))
+                {
+                    Log(L"release  %u -> restore opponent %u", state.scan, opponent.scan);
+                }
             }
         }
     }
@@ -569,9 +640,9 @@ void HandleKey(Profile& profile, WORD scanCode, bool down)
 // Hybrid filters its own synthetic events out of Raw Input, so this restoration
 // cannot be mistaken for a real press. A single synthetic keydown is therefore
 // the same clean restoration used by Release.
-void RestoreHybridKey(KeyState& state)
+bool RestoreHybridKey(KeyState& state)
 {
-    InjectKey(state, true);
+    return SetInjectedKeyState(state, true);
 }
 
 void HandleHybridKey(Profile& profile, WORD scanCode, bool down)
@@ -608,9 +679,10 @@ void HandleHybridKey(Profile& profile, WORD scanCode, bool down)
             KeyState& opponent = opponentIt->second;
             if (opponent.held && opponent.scriptDown)
             {
-                opponent.scriptDown = false;
-                InjectKey(opponent, false);
-                Log(L"compat press %u -> release opponent %u", state.scan, opponent.scan);
+                if (SetInjectedKeyState(opponent, false))
+                {
+                    Log(L"compat press %u -> release opponent %u", state.scan, opponent.scan);
+                }
             }
         }
 
@@ -635,11 +707,13 @@ void HandleHybridKey(Profile& profile, WORD scanCode, bool down)
         }
 
         KeyState& opponent = opponentIt->second;
-        if (opponent.held && !opponent.scriptDown)
+        if (opponent.held && !opponent.scriptDown &&
+            !HasHeldOpponent(profile, opponentScan))
         {
-            opponent.scriptDown = true;
-            RestoreHybridKey(opponent);
-            Log(L"compat release %u -> restore opponent %u", state.scan, opponent.scan);
+            if (RestoreHybridKey(opponent))
+            {
+                Log(L"compat release %u -> restore opponent %u", state.scan, opponent.scan);
+            }
         }
     }
 }
@@ -650,26 +724,80 @@ void HandleHybridKey(Profile& profile, WORD scanCode, bool down)
 // Used by Blocking and Both. In Both the value is that the opponent's physical
 // key is also gone from the system, so a game polling GetAsyncKeyState cannot
 // still see it held.
-void HandleBlocking(Profile& profile, WORD scanCode, bool down)
+void QueueBlockingRestore(const Profile& profile, WORD releasedScan);
+
+// Restores keys that lost to releasedScan while it was held. Keeping this as a
+// helper lets the rare physical-keyup fallback defer restoration until Windows
+// has delivered that native keyup.
+bool RestoreBlockingOpponents(Profile& profile, WORD releasedScan)
+{
+    const auto opponentsIt = profile.opponents.find(releasedScan);
+    if (opponentsIt == profile.opponents.end())
+    {
+        return true;
+    }
+
+    bool complete = true;
+    for (const WORD opponentScan : opponentsIt->second)
+    {
+        auto opponentIt = profile.states.find(opponentScan);
+        if (opponentIt == profile.states.end())
+        {
+            continue;
+        }
+
+        KeyState& opponent = opponentIt->second;
+        if (opponent.held && !opponent.scriptDown &&
+            !HasHeldOpponent(profile, opponentScan))
+        {
+            if (SetInjectedKeyState(opponent, true))
+            {
+                Log(L"blocking up   %u -> restore opponent %u", releasedScan, opponent.scan);
+            }
+            else
+            {
+                complete = false;
+            }
+        }
+    }
+
+    return complete;
+}
+
+HookAction HandleBlocking(Profile& profile, WORD scanCode, bool down)
 {
     auto stateIt = profile.states.find(scanCode);
     if (stateIt == profile.states.end())
     {
-        return;
+        return HookAction::Pass;
     }
 
     KeyState& state = stateIt->second;
     const auto opponentsIt = profile.opponents.find(scanCode);
     if (opponentsIt == profile.opponents.end())
     {
-        return;
+        return HookAction::Pass;
     }
 
     if (down)
     {
         if (state.held)
         {
-            return; // auto repeat of a key the game already holds
+            if (!state.scriptDown && !HasHeldOpponent(profile, scanCode))
+            {
+                // A previous restoration was rejected. Retry it while the
+                // physical key is still held; if that also fails, let this
+                // real repeat through so the game cannot remain stuck up.
+                if (SetInjectedKeyState(state, true))
+                {
+                    return HookAction::Swallow;
+                }
+
+                state.scriptDown = true;
+                return HookAction::Pass;
+            }
+
+            return HookAction::Swallow; // auto repeat of an already-owned key
         }
 
         state.held = true;
@@ -685,49 +813,58 @@ void HandleBlocking(Profile& profile, WORD scanCode, bool down)
             KeyState& opponent = opponentIt->second;
             if (opponent.held && opponent.scriptDown)
             {
-                opponent.scriptDown = false;
-                InjectKey(opponent, false);
-                Log(L"blocking down %u -> release opponent %u", state.scan, opponent.scan);
+                if (SetInjectedKeyState(opponent, false))
+                {
+                    Log(L"blocking down %u -> release opponent %u", state.scan, opponent.scan);
+                }
             }
         }
 
-        state.scriptDown = true;
-        InjectKey(state, true);
-        Log(L"blocking down %u", state.scan);
-    }
-    else
-    {
-        if (!state.held)
+        if (SetInjectedKeyState(state, true))
         {
-            return;
+            Log(L"blocking down %u", state.scan);
+            return HookAction::Swallow;
         }
 
-        state.held = false;
+        // The injected replacement was rejected. Pass the original physical
+        // keydown instead and reflect that native delivery in the state.
+        state.scriptDown = true;
+        return HookAction::Pass;
+    }
 
-        if (state.scriptDown)
+    if (!state.held)
+    {
+        return HookAction::Pass;
+    }
+
+    state.held = false;
+
+    if (state.scriptDown)
+    {
+        if (SetInjectedKeyState(state, false))
         {
-            state.scriptDown = false;
-            InjectKey(state, false);
             Log(L"blocking up   %u", state.scan);
         }
-
-        for (const WORD opponentScan : opponentsIt->second)
+        else
         {
-            auto opponentIt = profile.states.find(opponentScan);
-            if (opponentIt == profile.states.end())
-            {
-                continue;
-            }
-
-            KeyState& opponent = opponentIt->second;
-            if (opponent.held && !opponent.scriptDown)
-            {
-                opponent.scriptDown = true;
-                InjectKey(opponent, true);
-                Log(L"blocking up   %u -> restore opponent %u", state.scan, opponent.scan);
-            }
+            // The original physical keyup is now the only reliable release.
+            // Queue restoration after the hook has returned so it cannot be
+            // ordered ahead of that native keyup.
+            state.scriptDown = false;
+            QueueBlockingRestore(profile, scanCode);
+            return HookAction::Pass;
         }
     }
+
+    if (!RestoreBlockingOpponents(profile, scanCode))
+    {
+        // One deferred retry handles a transient SendInput rejection. If it is
+        // still rejected, the held key's next real repeat takes the fallback
+        // path above rather than leaving a silent stuck state.
+        QueueBlockingRestore(profile, scanCode);
+    }
+
+    return HookAction::Swallow;
 }
 
 // ------------------------------------------------------------------ targets
@@ -820,13 +957,6 @@ ForegroundInfo DescribeForeground()
     return info;
 }
 
-// Returns the index of the profile owning the foreground window, or -1.
-int FindActiveProfile()
-{
-    const ForegroundInfo info = DescribeForeground();
-    return info.matchIndex;
-}
-
 Profile* ActiveProfile()
 {
     const int index = g_activeProfile.load(std::memory_order_acquire);
@@ -838,17 +968,61 @@ Profile* ActiveProfile()
     return &g_profiles[index];
 }
 
-// Guards the engine state, because the foreground is now checked from two
-// places: the event hook and the polling thread. Without it one thread could
-// reset a profile's state in the middle of the other processing a keystroke,
-// which would show up as keys sticking.
-std::mutex g_stateMutex;
-
-// Signalled by the interface to ask for a clean stop. Declared here because the
-// foreground polling thread waits on it too.
+// Signalled by the interface to ask for a clean stop. The completion event lets
+// the watchdog wait until the message thread has released all injected keys.
 HANDLE g_shutdownEvent = nullptr;
+HANDLE g_shutdownCompleteEvent = nullptr;
+HANDLE g_foregroundRefreshEvent = nullptr;
+std::thread g_shutdownWatchdogThread;
+std::thread g_foregroundPollThread;
+bool g_releasedEverything = false;
 
-constexpr UINT kUpdateKeyboardHookMessage = WM_APP + 41;
+// Runs from the state-owning message thread after a blocking keyup has either
+// completed or been allowed through natively. The profile is revalidated in
+// case focus changed between the hook callback and this queued work.
+void RetryBlockingRestoreOnMessageThread(int profileIndex, WORD releasedScan)
+{
+    if (g_stopping || profileIndex != g_activeProfile.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    Profile* profile = ActiveProfile();
+    if (profile == nullptr || profile->mode != EngineMode::Blocking)
+    {
+        return;
+    }
+
+    const auto releasedIt = profile->states.find(releasedScan);
+    if (releasedIt != profile->states.end() && releasedIt->second.held)
+    {
+        // The user pressed the source again before this retry ran, so its old
+        // release must not restore an opponent into the new press.
+        return;
+    }
+
+    RestoreBlockingOpponents(*profile, releasedScan);
+}
+
+void QueueBlockingRestore(const Profile& profile, WORD releasedScan)
+{
+    if (g_stopping || g_mainThreadId == 0)
+    {
+        return;
+    }
+
+    const int profileIndex = g_activeProfile.load(std::memory_order_acquire);
+    if (profileIndex < 0 || profileIndex >= static_cast<int>(g_profiles.size()) ||
+        &g_profiles[profileIndex] != &profile)
+    {
+        return;
+    }
+
+    PostThreadMessageW(g_mainThreadId,
+                       kRestoreBlockingMessage,
+                       static_cast<WPARAM>(profileIndex),
+                       static_cast<LPARAM>(releasedScan));
+}
 
 EngineMode ParseModeName(const std::wstring& name)
 {
@@ -913,7 +1087,10 @@ void LogForeground(const wchar_t* reason, const ForegroundInfo& info)
 
 void SwitchProfile(int next)
 {
-    std::lock_guard<std::mutex> lock(g_stateMutex);
+    if (next < -1 || next >= static_cast<int>(g_profiles.size()))
+    {
+        next = -1;
+    }
 
     if (next == g_activeProfile.load(std::memory_order_relaxed))
     {
@@ -943,57 +1120,63 @@ void SwitchProfile(int next)
     }
     else
     {
-        // The full picture, so a missing match can be diagnosed rather than guessed
-        // at. Recorded once per transition, not on every poll.
-        const ForegroundInfo info = DescribeForeground();
-
-        if (info.matchIndex >= 0)
-        {
-            // A profile did match, so reaching here means the switch is being undone
-            // for another reason.
-            Log(L"NOT-ARMED  a profile did match at index %d, this is unexpected", info.matchIndex);
-        }
-
-        LogForeground(L"NOT-ARMED", info);
-
-        // The configured names are listed alongside, so a mismatch such as
-        // "GTA5_VE.exe" against "GTA5" is visible at a glance.
-        if (info.readOk && !g_profiles.empty())
-        {
-            std::wstring known;
-            for (const auto& profile : g_profiles)
-            {
-                known += L"\"" + profile.target + L"\"";
-                if (!profile.targetPath.empty())
-                {
-                    known += L" @ \"" + profile.targetPath + L"\"";
-                }
-                known += L" ";
-            }
-
-            Log(L"%-22s configured targets: %s", L"NOT-ARMED", known.c_str());
-        }
+        // Detailed foreground inspection happens in the background watcher;
+        // do not repeat it in the input message queue just to produce logging.
+        Log(L"NOT-ARMED  no matching foreground profile");
     }
 
     // A Hybrid profile uses WM_INPUT and must not coexist with the
     // global low-level hook. A normal release or blocking profile still needs
     // that hook for repeat suppression or event replacement respectively.
     const Profile* active = ActiveProfile();
-    g_keyboardHookWanted.store(active != nullptr && active->mode != EngineMode::Hybrid,
-                               std::memory_order_release);
+    g_keyboardHookWanted = active != nullptr && active->mode != EngineMode::Hybrid;
+    UpdateKeyboardHook();
+}
 
-    // Foreground notifications and the polling thread may call this off the
-    // message thread. Hook installation is therefore deferred to its owner.
-    if (g_mainThreadId != 0)
+// A foreground probe is read-only and happens off the input message thread.
+// Applying its result is still serialized with Raw Input and the low-level
+// hook. The root-window check rejects a stale probe after a rapid Alt+Tab.
+void ApplyForegroundRefreshOnMessageThread(int next, HWND observedRoot)
+{
+    const HWND foreground = GetForegroundWindow();
+    const HWND currentRoot = foreground == nullptr ? nullptr : GetAncestor(foreground, GA_ROOT);
+    if (currentRoot == observedRoot)
     {
-        if (GetCurrentThreadId() == g_mainThreadId)
-        {
-            UpdateKeyboardHook();
-        }
-        else
-        {
-            PostThreadMessageW(g_mainThreadId, kUpdateKeyboardHookMessage, 0, 0);
-        }
+        SwitchProfile(next);
+    }
+    else if (!g_shutdownRequested.load(std::memory_order_acquire) &&
+             g_foregroundRefreshEvent != nullptr)
+    {
+        // The foreground changed while its process was being inspected. Ask
+        // the poller for a fresh read immediately instead of waiting for its
+        // 250 ms safety interval.
+        SetEvent(g_foregroundRefreshEvent);
+    }
+}
+
+// Watcher threads never touch a Profile or KeyState. Repeated requests are
+// coalesced: each one merely posts a read-only foreground match for the input
+// thread to validate and apply.
+void RequestForegroundRefresh()
+{
+    if (g_shutdownRequested.load(std::memory_order_acquire) || g_mainThreadId == 0)
+    {
+        return;
+    }
+
+    bool expected = false;
+    if (!g_foregroundRefreshPosted.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel, std::memory_order_acquire))
+    {
+        return;
+    }
+
+    const ForegroundInfo info = DescribeForeground();
+    const WPARAM matchIndex = static_cast<WPARAM>(static_cast<INT_PTR>(info.matchIndex));
+    const LPARAM root = reinterpret_cast<LPARAM>(info.root);
+    if (!PostThreadMessageW(g_mainThreadId, kRefreshForegroundMessage, matchIndex, root))
+    {
+        g_foregroundRefreshPosted.store(false, std::memory_order_release);
     }
 }
 
@@ -1003,7 +1186,15 @@ void SwitchProfile(int next)
 // missed event is still caught within half a second.
 void CALLBACK ForegroundEventProc(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD)
 {
-    SwitchProfile(FindActiveProfile());
+    // Do not inspect another process from this callback. Depending on how
+    // Windows dispatches the event, it may share the input message thread.
+    // Waking the dedicated poller keeps all potentially slow inspection away
+    // from Raw Input and the low-level hook.
+    if (!g_shutdownRequested.load(std::memory_order_acquire) &&
+        g_foregroundRefreshEvent != nullptr)
+    {
+        SetEvent(g_foregroundRefreshEvent);
+    }
 }
 
 // Re-checks which game owns the foreground a few times a second.
@@ -1019,50 +1210,31 @@ void CALLBACK ForegroundEventProc(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD,
 // enough to run continuously.
 void ForegroundPollLoop()
 {
-    DWORD lastBeat = GetTickCount();
-    long lastCount = 0;
-
-    while (WaitForSingleObject(g_shutdownEvent, 250) == WAIT_TIMEOUT)
+    if (g_foregroundRefreshEvent == nullptr)
     {
-        SwitchProfile(FindActiveProfile());
-
-        // Every five seconds, report that the hook is still being called.
-        //
-        // Only while a log is open: with logging off there is nothing to write to, and
-        // the counters it reads are not maintained either.
-        const DWORD now = GetTickCount();
-        if (g_log != nullptr && now - lastBeat >= 5000)
+        while (WaitForSingleObject(g_shutdownEvent, 250) == WAIT_TIMEOUT)
         {
-            lastBeat = now;
-
-            const long total = g_hookEventCount;
-            const DWORD sinceLastEvent = now - g_lastHookCall;
-
-            // Every way an event can end up, so a silent period can be attributed
-            // rather than guessed at.
-            //
-            //   total      events the hook was called for
-            //   own        ours, coming back round
-            //   foreign    injected by something other than us
-            //   unarmed    real keys with no game in front
-            //   unmanaged  real keys that are not part of any pair
-            //   managed    real keys the engine acted on
-            //   busy       dropped because the engine was mid-switch
-            Log(L"heartbeat  total=%ld (+%ld)  own=%ld  foreign=%ld  unarmed=%ld  "
-                L"unmanaged=%ld  managed=%ld  busy=%ld  idle_ms=%lu  armed=%d",
-                total,
-                total - lastCount,
-                g_ownEventCount,
-                g_foreignEventCount,
-                g_unarmedEventCount,
-                g_unmanagedEventCount,
-                g_managedEventCount,
-                g_busyEventCount,
-                sinceLastEvent,
-                g_activeProfile.load(std::memory_order_relaxed));
-
-            lastCount = total;
+            RequestForegroundRefresh();
         }
+        return;
+    }
+
+    const HANDLE events[] = {g_shutdownEvent, g_foregroundRefreshEvent};
+    while (true)
+    {
+        const DWORD wait = WaitForMultipleObjects(2, events, FALSE, 250);
+        if (wait == WAIT_OBJECT_0)
+        {
+            return;
+        }
+
+        if (wait == WAIT_OBJECT_0 + 1 || wait == WAIT_TIMEOUT)
+        {
+            RequestForegroundRefresh();
+            continue;
+        }
+
+        return;
     }
 }
 
@@ -1121,37 +1293,9 @@ LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
     const WORD keyId = static_cast<WORD>(baseScan | (extended ? kExtendedBit : 0));
 
     // Never query foreground windows or open processes from this callback.
-    //
-    // Windows invokes a low-level hook synchronously and silently removes it when a
-    // callback takes longer than LowLevelHooksTimeout. After an Alt+Tab the old code
-    // did precisely that expensive work here (and could then wait for the foreground
-    // thread's state transition). The foreground event and the polling thread own
-    // profile detection; this callback only consumes their already-prepared state.
-    // That makes a missed or delayed focus notification harmless: a key may pass
-    // through during the 250 ms polling window, but the hook itself stays alive.
-    //
-    // Taken without waiting, never blocking.
-    //
-    // Windows removes a low level hook that takes longer than
-    // LowLevelHooksTimeout to return, and it does so silently. The foreground
-    // threads take this same lock while they re-sync key state, so a plain lock_guard
-    // here could wait long enough for Windows to remove the hook.
-    //
-    // If the lock cannot be had in time the event is passed through untouched. That
-    // costs one keystroke of snap tap and keeps the hook alive, which is the right
-    // trade: a dead hook breaks the keyboard for everything.
-    std::unique_lock<std::mutex> lock(g_stateMutex, std::try_to_lock);
-    if (!lock.owns_lock())
-    {
-        if (g_log != nullptr)
-        {
-            if (g_log != nullptr)
-            {
-                InterlockedIncrement(&g_busyEventCount);
-            }
-        }
-        return CallNextHookEx(g_hook, nCode, wParam, lParam);
-    }
+    // This hook, WM_INPUT and profile transitions are all dispatched by this
+    // same message thread, so there is no shared lock to contend for and no
+    // physical event is ever skipped while a profile is changing.
 
     Profile* profile = ActiveProfile();
     if (profile == nullptr)
@@ -1220,12 +1364,19 @@ LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
     if (profile->mode == EngineMode::Blocking)
     {
         // The physical event never reaches the system; the engine supplies the
-        // replacement instead, so the game only ever sees injected input.
-        HandleBlocking(*profile, key, isDown);
-        return 1;
+        // replacement instead. If Windows rejects that replacement, pass this
+        // one physical event through rather than silently dropping a key.
+        if (HandleBlocking(*profile, key, isDown) == HookAction::Swallow)
+        {
+            return 1;
+        }
+
+        return CallNextHookEx(g_hook, nCode, wParam, lParam);
     }
 
-    const auto action = IsSuppressedRepeat(state, isDown) ? HookAction::Swallow : HookAction::Pass;
+    const auto action = IsSuppressedRepeat(*profile, key, state, isDown)
+        ? HookAction::Swallow
+        : HookAction::Pass;
 
     HandleKey(*profile, key, isDown);
 
@@ -1267,25 +1418,6 @@ void HandleRawKeyboardInput(const RAWKEYBOARD& keyboard)
     const bool extended = (keyboard.Flags & (RI_KEY_E0 | RI_KEY_E1)) != 0;
     const WORD keyId = static_cast<WORD>(baseScan | (extended ? kExtendedBit : 0));
 
-    const int candidateIndex = g_activeProfile.load(std::memory_order_acquire);
-    if (candidateIndex < 0 || candidateIndex >= static_cast<int>(g_profiles.size()))
-    {
-        return;
-    }
-
-    const Profile& candidate = g_profiles[candidateIndex];
-    if (candidate.mode != EngineMode::Hybrid ||
-        (!candidate.states.contains(keyId) && !candidate.states.contains(baseScan)))
-    {
-        return;
-    }
-
-    std::unique_lock<std::mutex> lock(g_stateMutex, std::try_to_lock);
-    if (!lock.owns_lock())
-    {
-        return;
-    }
-
     Profile* profile = ActiveProfile();
     if (profile == nullptr || profile->mode != EngineMode::Hybrid)
     {
@@ -1316,7 +1448,20 @@ void HandleRawKeyboardInput(const RAWKEYBOARD& keyboard)
     {
         if (!state.scriptDown)
         {
-            InjectKey(state, false);
+            if (!HasHeldOpponent(*profile, key))
+            {
+                // A failed restoration left bookkeeping at "up", but the
+                // original opposing key is no longer held. This native repeat
+                // is therefore allowed through and makes the key down again.
+                state.scriptDown = true;
+            }
+            else if (!InjectKey(state, false))
+            {
+                // The physical repeat has already reasserted the native down.
+                // If Windows rejects our corrective keyup, reflect that real
+                // repeat instead of pretending the old key is still released.
+                state.scriptDown = true;
+            }
         }
         return;
     }
@@ -1383,7 +1528,7 @@ bool CreateRawInputWindow()
 
 void UpdateKeyboardHook()
 {
-    const bool wanted = g_keyboardHookWanted.load(std::memory_order_acquire);
+    const bool wanted = g_keyboardHookWanted;
     if (wanted && g_hook == nullptr)
     {
         g_hook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardProc, g_instance, 0);
@@ -1542,13 +1687,15 @@ void ParseProfile(const std::wstring& argument)
 // player is still holding it.
 void ReleaseEverythingHeld()
 {
-    // Called from the watchdog thread as well as from the message loop, so the
-    // state it walks must not be changing underneath it.
-    std::lock_guard<std::mutex> lock(g_stateMutex);
+    if (g_releasedEverything)
+    {
+        return;
+    }
+
+    g_releasedEverything = true;
 
     if (Profile* profile = ActiveProfile())
     {
-        RestoreSuppressedKeys(*profile);
         ResetAll(*profile);
     }
 
@@ -1573,27 +1720,316 @@ void ReleaseEverythingHeld()
 //
 // The interface terminates the process rather than closing it, and
 // TerminateProcess runs no cleanup at all, so relying on the code after the
-// message loop would leave keys held. This thread runs the release first and
-// only lets the process end afterwards.
+// message loop would leave keys held. The watchdog must not release them
+// itself: only the message thread owns keyboard state.
 DWORD WINAPI ShutdownWatchdog(LPVOID)
 {
     const DWORD wait = WaitForSingleObject(g_shutdownEvent, INFINITE);
 
     if (wait == WAIT_OBJECT_0)
     {
-        ReleaseEverythingHeld();
-        Log(L"watchdog: keys released, stopping");
-
-        if (g_mainThreadId != 0)
+        g_shutdownRequested.store(true, std::memory_order_release);
+        if (g_mainThreadId != 0 &&
+            PostThreadMessageW(g_mainThreadId, kReleaseAndQuitMessage, 0, 0))
         {
-            PostThreadMessageW(g_mainThreadId, WM_QUIT, 0, 0);
+            if (g_shutdownCompleteEvent != nullptr)
+            {
+                WaitForSingleObject(g_shutdownCompleteEvent, 1500);
+            }
         }
     }
 
     return 0;
 }
 
+// Runs in the state-owning message thread. Stop accepting focus changes before
+// releasing keys so a late notification cannot re-arm a profile halfway
+// through shutdown.
+void ShutdownOnMessageThread()
+{
+    if (g_stopping)
+    {
+        return;
+    }
+
+    g_stopping = true;
+    g_shutdownRequested.store(true, std::memory_order_release);
+
+    if (g_foregroundHook != nullptr)
+    {
+        UnhookWinEvent(g_foregroundHook);
+        g_foregroundHook = nullptr;
+    }
+
+    g_keyboardHookWanted = false;
+    UpdateKeyboardHook();
+    ReleaseEverythingHeld();
+
+    if (g_rawInputWindow != nullptr)
+    {
+        DestroyWindow(g_rawInputWindow);
+        g_rawInputWindow = nullptr;
+    }
+
+    if (g_shutdownCompleteEvent != nullptr)
+    {
+        SetEvent(g_shutdownCompleteEvent);
+    }
+}
+
 // ------------------------------------------------------------------ selftest
+
+// A controllable SendInput replacement makes state-machine tests deterministic
+// and keeps them from generating real keyboard input on the developer's PC.
+struct CapturedInjection
+{
+    WORD scan = 0;
+    bool down = false;
+};
+
+std::vector<CapturedInjection> g_capturedInjections;
+int g_testSendInputCalls = 0;
+int g_testFailOnSendInputCall = 0;
+
+UINT WINAPI CaptureSendInput(UINT count, LPINPUT inputs, int)
+{
+    ++g_testSendInputCalls;
+    if (g_testFailOnSendInputCall == g_testSendInputCalls)
+    {
+        return 0;
+    }
+
+    for (UINT index = 0; index < count; ++index)
+    {
+        g_capturedInjections.push_back(
+            {inputs[index].ki.wScan, (inputs[index].ki.dwFlags & KEYEVENTF_KEYUP) == 0});
+    }
+
+    return count;
+}
+
+class CapturedSendInputScope
+{
+public:
+    CapturedSendInputScope()
+        : previous_(g_sendInput)
+    {
+        g_capturedInjections.clear();
+        g_testSendInputCalls = 0;
+        g_testFailOnSendInputCall = 0;
+        g_sendInput = CaptureSendInput;
+    }
+
+    ~CapturedSendInputScope()
+    {
+        g_sendInput = previous_;
+        g_capturedInjections.clear();
+        g_testSendInputCalls = 0;
+        g_testFailOnSendInputCall = 0;
+    }
+
+private:
+    SendInputFunction previous_;
+};
+
+Profile MakeHybridTestProfile()
+{
+    Profile profile;
+    profile.target = L"selftest";
+    profile.mode = EngineMode::Hybrid;
+    AddPair(profile, 0x1E, 0x20); // A and D
+    profile.states[0x1E].vk = 'A';
+    profile.states[0x20].vk = 'D';
+    return profile;
+}
+
+// Exercises the exact Hybrid sequence that used to leave an old direction
+// stuck: hold D, hold A, release A, then release D. It also verifies that a
+// rejected SendInput never changes scriptDown and that a repeated raw keydown
+// recovers to the physical state if its corrective release is rejected.
+int RunHybridSelfTest(const std::wstring& logPath)
+{
+    OpenLogFile(logPath, &g_log);
+    CapturedSendInputScope capture;
+
+    int failures = 0;
+    auto check = [&](const wchar_t* what, bool ok)
+    {
+        if (!ok)
+        {
+            ++failures;
+        }
+        Log(L"%s  %s", ok ? L"pass" : L"FAIL", what);
+    };
+
+    constexpr WORD keyA = 0x1E;
+    constexpr WORD keyD = 0x20;
+
+    // The normal order from the reported gameplay case: D -> A -> release A
+    // -> release D. D must be restored exactly once while it remains held.
+    {
+        Profile profile = MakeHybridTestProfile();
+        HandleHybridKey(profile, keyD, true);
+        HandleHybridKey(profile, keyA, true);
+        HandleHybridKey(profile, keyA, false);
+        HandleHybridKey(profile, keyD, false);
+
+        check(L"hybrid restores D after A is released",
+              !profile.states[keyA].held && !profile.states[keyA].scriptDown &&
+              !profile.states[keyD].held && !profile.states[keyD].scriptDown);
+        check(L"hybrid transcript is D up, D down",
+              g_capturedInjections.size() == 2 &&
+              g_capturedInjections[0].scan == keyD && !g_capturedInjections[0].down &&
+              g_capturedInjections[1].scan == keyD && g_capturedInjections[1].down);
+    }
+
+    // Once the originally suppressed key has physically gone up, releasing the
+    // other key must not re-inject a stale keydown.
+    g_capturedInjections.clear();
+    g_testSendInputCalls = 0;
+    {
+        Profile profile = MakeHybridTestProfile();
+        HandleHybridKey(profile, keyA, true);
+        HandleHybridKey(profile, keyD, true);
+        HandleHybridKey(profile, keyA, false);
+        HandleHybridKey(profile, keyD, false);
+
+        check(L"hybrid does not restore a physically released opponent",
+              g_capturedInjections.size() == 1 &&
+              g_capturedInjections[0].scan == keyA && !g_capturedInjections[0].down);
+    }
+
+    // A failed synthetic release leaves the state as down; the engine must not
+    // claim that Windows released a key it did not accept.
+    g_capturedInjections.clear();
+    g_testSendInputCalls = 0;
+    g_testFailOnSendInputCall = 1;
+    {
+        Profile profile = MakeHybridTestProfile();
+        HandleHybridKey(profile, keyD, true);
+        HandleHybridKey(profile, keyA, true);
+        check(L"failed hybrid release keeps opponent marked down",
+              profile.states[keyD].held && profile.states[keyD].scriptDown &&
+              g_capturedInjections.empty());
+    }
+
+    // A failed restore likewise leaves the key marked released. A later real
+    // event can then reconcile it instead of the bookkeeping drifting away.
+    g_capturedInjections.clear();
+    g_testSendInputCalls = 0;
+    g_testFailOnSendInputCall = 0;
+    {
+        Profile profile = MakeHybridTestProfile();
+        HandleHybridKey(profile, keyD, true);
+        HandleHybridKey(profile, keyA, true);
+        g_testFailOnSendInputCall = g_testSendInputCalls + 1;
+        HandleHybridKey(profile, keyA, false);
+
+        check(L"failed hybrid restore stays marked released",
+              profile.states[keyD].held && !profile.states[keyD].scriptDown &&
+              g_capturedInjections.size() == 1 &&
+              g_capturedInjections[0].scan == keyD && !g_capturedInjections[0].down);
+    }
+
+    // Release mode has the same native-repeat recovery rule. If D's synthetic
+    // restoration fails after A is up, D's next physical repeat must be passed
+    // through rather than swallowed as if A were still held.
+    g_capturedInjections.clear();
+    g_testSendInputCalls = 0;
+    g_testFailOnSendInputCall = 0;
+    {
+        Profile profile = MakeHybridTestProfile();
+        profile.mode = EngineMode::Release;
+        HandleKey(profile, keyD, true);
+        HandleKey(profile, keyA, true);
+        g_testFailOnSendInputCall = g_testSendInputCalls + 1;
+        HandleKey(profile, keyA, false);
+
+        const bool repeatSuppressed =
+            IsSuppressedRepeat(profile, keyD, profile.states[keyD], true);
+        HandleKey(profile, keyD, true);
+        check(L"release repeat repairs a failed restore",
+              !repeatSuppressed && profile.states[keyD].scriptDown);
+    }
+
+    // Repeat the raw-input path itself. If the corrective keyup is rejected,
+    // the native repeat has already reached the game, so scriptDown must return
+    // to true rather than leave an impossible suppressed state behind.
+    {
+        std::vector<Profile> savedProfiles = std::move(g_profiles);
+        const int savedActive = g_activeProfile.load(std::memory_order_relaxed);
+        g_profiles.clear();
+        g_profiles.push_back(MakeHybridTestProfile());
+        g_activeProfile.store(0, std::memory_order_release);
+        g_capturedInjections.clear();
+        g_testSendInputCalls = 0;
+        g_testFailOnSendInputCall = 0;
+
+        RAWKEYBOARD keyDDown{};
+        keyDDown.MakeCode = keyD;
+        keyDDown.VKey = 'D';
+        RAWKEYBOARD keyADown{};
+        keyADown.MakeCode = keyA;
+        keyADown.VKey = 'A';
+
+        HandleRawKeyboardInput(keyDDown);
+        HandleRawKeyboardInput(keyADown);
+        g_testFailOnSendInputCall = g_testSendInputCalls + 1;
+        HandleRawKeyboardInput(keyDDown); // physical repeat while D is suppressed
+
+        check(L"failed raw repeat release follows native repeat",
+              g_profiles[0].states[keyD].held && g_profiles[0].states[keyD].scriptDown);
+
+        g_profiles = std::move(savedProfiles);
+        g_activeProfile.store(savedActive, std::memory_order_release);
+    }
+
+    // The same case through the actual Raw Input handler: A goes up, restoring
+    // D is rejected, then D repeats. There must be no second synthetic D up.
+    {
+        std::vector<Profile> savedProfiles = std::move(g_profiles);
+        const int savedActive = g_activeProfile.load(std::memory_order_relaxed);
+        g_profiles.clear();
+        g_profiles.push_back(MakeHybridTestProfile());
+        g_activeProfile.store(0, std::memory_order_release);
+        g_capturedInjections.clear();
+        g_testSendInputCalls = 0;
+        g_testFailOnSendInputCall = 0;
+
+        RAWKEYBOARD keyDDown{};
+        keyDDown.MakeCode = keyD;
+        keyDDown.VKey = 'D';
+        RAWKEYBOARD keyADown{};
+        keyADown.MakeCode = keyA;
+        keyADown.VKey = 'A';
+        RAWKEYBOARD keyAUp = keyADown;
+        keyAUp.Flags = RI_KEY_BREAK;
+
+        HandleRawKeyboardInput(keyDDown);
+        HandleRawKeyboardInput(keyADown);
+        g_testFailOnSendInputCall = g_testSendInputCalls + 1;
+        HandleRawKeyboardInput(keyAUp);
+        const size_t countBeforeRepeat = g_capturedInjections.size();
+        g_testFailOnSendInputCall = 0;
+        HandleRawKeyboardInput(keyDDown);
+
+        check(L"raw repeat repairs failed restore without another release",
+              g_profiles[0].states[keyD].scriptDown &&
+              g_capturedInjections.size() == countBeforeRepeat);
+
+        g_profiles = std::move(savedProfiles);
+        g_activeProfile.store(savedActive, std::memory_order_release);
+    }
+
+    Log(L"hybrid selftest: %d failed", failures);
+    if (g_log != nullptr)
+    {
+        std::fclose(g_log);
+        g_log = nullptr;
+    }
+
+    return failures == 0 ? 0 : 1;
+}
 
 // Drives the engine directly, with no hook and no real keyboard, and reports
 // the resulting key state. Run with:  SnapHookWorker.exe --selftest <log path>
@@ -1606,6 +2042,7 @@ DWORD WINAPI ShutdownWatchdog(LPVOID)
 int RunSelfTest(const std::wstring& logPath)
 {
     OpenLogFile(logPath, &g_log);
+    CapturedSendInputScope capture;
 
     Profile profile;
     profile.target = L"selftest";
@@ -1645,20 +2082,21 @@ int RunSelfTest(const std::wstring& logPath)
     // Press A again, let repeats arrive, then press D. The repeats must be
     // classified for dropping and must not re-run the suppression logic.
     HandleKey(profile, keyA, true);
-    Log(L"repeat of A suppressed = %d", IsSuppressedRepeat(profile.states[keyA], true) ? 1 : 0);
+    Log(L"repeat of A suppressed = %d",
+        IsSuppressedRepeat(profile, keyA, profile.states[keyA], true) ? 1 : 0);
     HandleKey(profile, keyA, true);
     HandleKey(profile, keyD, true);
     show(L"A held, repeat, press D");
 
     // The repeat of the released key must be dropped for as long as D is held.
     Log(L"repeat of A while D held suppressed = %d",
-        IsSuppressedRepeat(profile.states[keyA], true) ? 1 : 0);
+        IsSuppressedRepeat(profile, keyA, profile.states[keyA], true) ? 1 : 0);
 
     // Once A is let go the flag clears, so a fresh press is never dropped.
     HandleKey(profile, keyD, false);
     HandleKey(profile, keyA, false);
     Log(L"repeat of A after release suppressed = %d",
-        IsSuppressedRepeat(profile.states[keyA], true) ? 1 : 0);
+        IsSuppressedRepeat(profile, keyA, profile.states[keyA], true) ? 1 : 0);
 
     Log(L"selftest done");
 
@@ -1961,6 +2399,7 @@ int RunLatencyBenchmark(const std::wstring& logPath)
 int RunSharedKeySelfTest(const std::wstring& logPath)
 {
     OpenLogFile(logPath, &g_log);
+    CapturedSendInputScope capture;
 
     Profile profile;
     AddPair(profile, 0x11, 0x1F); // W : S
@@ -2011,6 +2450,15 @@ int RunSharedKeySelfTest(const std::wstring& logPath)
     HandleKey(profile, keyW, true);
     HandleKey(profile, keyS, true);
     check(L"holding W then pressing S releases W", profile.states[keyW].held && !profile.states[keyW].scriptDown);
+
+    // W may be part of more than one pair. If S and A are both held, releasing
+    // just one of them must not restore W until the final opposing key is up.
+    HandleKey(profile, keyA, true);
+    HandleKey(profile, keyS, false);
+    check(L"releasing one of two opponents keeps W suppressed",
+          profile.states[keyW].held && !profile.states[keyW].scriptDown);
+    HandleKey(profile, keyA, false);
+    check(L"releasing final opponent restores W", profile.states[keyW].scriptDown);
 
     Log(L"shared key selftest: %d failed", failures);
 
@@ -2091,6 +2539,7 @@ int RunTargetSelfTest(const std::wstring& logPath)
 int RunBlockingSelfTest(const std::wstring& logPath)
 {
     OpenLogFile(logPath, &g_log);
+    CapturedSendInputScope capture;
 
     Profile profile;
     profile.target = L"selftest";
@@ -2113,6 +2562,16 @@ int RunBlockingSelfTest(const std::wstring& logPath)
             d.held ? 1 : 0, d.scriptDown ? 1 : 0);
     };
 
+    int failures = 0;
+    auto check = [&](const wchar_t* what, bool ok)
+    {
+        if (!ok)
+        {
+            ++failures;
+        }
+        Log(L"%s  %s", ok ? L"pass" : L"FAIL", what);
+    };
+
     Log(L"blocking selftest start  pair A(30):D(32)");
 
     // The hook path: both events are swallowed and replaced by injections, so
@@ -2129,7 +2588,58 @@ int RunBlockingSelfTest(const std::wstring& logPath)
     HandleBlocking(profile, keyA, false);
     show(L"release A");
 
-    Log(L"blocking selftest done");
+    // If Windows rejects the synthetic replacement for a first physical down,
+    // Blocking must let that genuine keydown through rather than lose it.
+    g_capturedInjections.clear();
+    g_testSendInputCalls = 0;
+    g_testFailOnSendInputCall = 1;
+    {
+        Profile failedDown = MakeHybridTestProfile();
+        failedDown.mode = EngineMode::Blocking;
+        const HookAction action = HandleBlocking(failedDown, keyA, true);
+        check(L"blocking passes a rejected replacement keydown",
+              action == HookAction::Pass &&
+              failedDown.states[keyA].held && failedDown.states[keyA].scriptDown &&
+              g_capturedInjections.empty());
+    }
+
+    // If an injected keyup is rejected, the corresponding native keyup is the
+    // fallback. The state must follow that native event and not remain stuck.
+    g_capturedInjections.clear();
+    g_testSendInputCalls = 0;
+    g_testFailOnSendInputCall = 0;
+    {
+        Profile failedUp = MakeHybridTestProfile();
+        failedUp.mode = EngineMode::Blocking;
+        HandleBlocking(failedUp, keyA, true);
+        g_testFailOnSendInputCall = g_testSendInputCalls + 1;
+        const HookAction action = HandleBlocking(failedUp, keyA, false);
+        check(L"blocking passes a rejected replacement keyup",
+              action == HookAction::Pass &&
+              !failedUp.states[keyA].held && !failedUp.states[keyA].scriptDown);
+    }
+
+    // A failed restoration is retried on the next physical repeat. The repeat
+    // remains swallowed only after its synthetic restoration succeeds.
+    g_capturedInjections.clear();
+    g_testSendInputCalls = 0;
+    g_testFailOnSendInputCall = 0;
+    {
+        Profile retry = MakeHybridTestProfile();
+        retry.mode = EngineMode::Blocking;
+        HandleBlocking(retry, keyD, true);
+        HandleBlocking(retry, keyA, true);
+        g_testFailOnSendInputCall = g_testSendInputCalls + 1;
+        const HookAction failedUpAction = HandleBlocking(retry, keyA, false);
+        g_testFailOnSendInputCall = 0;
+        const HookAction repeatAction = HandleBlocking(retry, keyD, true);
+
+        check(L"blocking repeat repairs a failed restore",
+              failedUpAction == HookAction::Pass &&
+              repeatAction == HookAction::Swallow && retry.states[keyD].scriptDown);
+    }
+
+    Log(L"blocking selftest: %d failed", failures);
 
     if (g_log != nullptr)
     {
@@ -2137,7 +2647,7 @@ int RunBlockingSelfTest(const std::wstring& logPath)
         g_log = nullptr;
     }
 
-    return 0;
+    return failures == 0 ? 0 : 1;
 }
 
 } // namespace
@@ -2186,6 +2696,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
         {
             return RunSharedKeySelfTest(argv[++i]);
         }
+        else if (EqualsIgnoreCase(arg, L"--selftest-hybrid") && i + 1 < argc)
+        {
+            return RunHybridSelfTest(argv[++i]);
+        }
         else if (EqualsIgnoreCase(arg, L"--benchmark") && i + 1 < argc)
         {
             const std::wstring target = argv[++i];
@@ -2215,8 +2729,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     g_instance = instance;
     g_mainThreadId = GetCurrentThreadId();
 
-    // PostThreadMessage is used to change the low-level hook from the foreground
-    // watcher. Make this thread's queue exist before any watcher can post to it.
+    // Foreground and shutdown watchers use PostThreadMessage. Make this thread's
+    // queue exist before any watcher can post to it.
     MSG queued{};
     PeekMessageW(&queued, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
 
@@ -2224,6 +2738,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     {
         return 1;
     }
+
+    // A named event lets the interface ask for a clean stop, so keys are released
+    // before the process ends.
+    if (g_shutdownEventName.empty())
+    {
+        g_shutdownEventName = L"Local\\SnapHookWorkerStop";
+    }
+
+    g_shutdownEvent = CreateEventW(nullptr, TRUE, FALSE, g_shutdownEventName.c_str());
+    g_shutdownCompleteEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_foregroundRefreshEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 
     g_activeProfile.store(-1, std::memory_order_release);
 
@@ -2233,9 +2758,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
         const ForegroundInfo startup = DescribeForeground();
         LogForeground(L"STARTUP", startup);
         Log(L"STARTUP    %zu profile(s) configured", g_profiles.size());
+        SwitchProfile(startup.matchIndex);
     }
-
-    SwitchProfile(FindActiveProfile());
 
     g_foregroundHook = SetWinEventHook(
         EVENT_SYSTEM_FOREGROUND,
@@ -2246,27 +2770,39 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
         0,
         WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
-    // A named event lets the interface ask for a clean stop, so keys are released
-    // before the process ends.
-    if (g_shutdownEventName.empty())
-    {
-        g_shutdownEventName = L"Local\\SnapHookWorkerStop";
-    }
-
-    g_shutdownEvent = CreateEventW(nullptr, TRUE, FALSE, g_shutdownEventName.c_str());
-
     if (g_shutdownEvent != nullptr)
     {
-        std::thread(ShutdownWatchdog, nullptr).detach();
-        std::thread(ForegroundPollLoop).detach();
+        g_shutdownWatchdogThread = std::thread(ShutdownWatchdog, nullptr);
+        g_foregroundPollThread = std::thread(ForegroundPollLoop);
     }
 
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0)
     {
-        if (message.message == kUpdateKeyboardHookMessage)
+        if (message.message == kRefreshForegroundMessage)
         {
-            UpdateKeyboardHook();
+            g_foregroundRefreshPosted.store(false, std::memory_order_release);
+            if (!g_stopping)
+            {
+                const int next = static_cast<int>(static_cast<INT_PTR>(message.wParam));
+                const HWND observedRoot = reinterpret_cast<HWND>(message.lParam);
+                ApplyForegroundRefreshOnMessageThread(next, observedRoot);
+            }
+            continue;
+        }
+
+        if (message.message == kReleaseAndQuitMessage)
+        {
+            ShutdownOnMessageThread();
+            PostQuitMessage(0);
+            continue;
+        }
+
+        if (message.message == kRestoreBlockingMessage)
+        {
+            RetryBlockingRestoreOnMessageThread(
+                static_cast<int>(message.wParam),
+                static_cast<WORD>(message.lParam));
             continue;
         }
 
@@ -2274,19 +2810,34 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
         DispatchMessageW(&message);
     }
 
-    ReleaseEverythingHeld();
+    ShutdownOnMessageThread();
 
-    if (g_hook)
+    if (g_shutdownEvent != nullptr)
     {
-        UnhookWindowsHookEx(g_hook);
+        SetEvent(g_shutdownEvent);
     }
-    if (g_foregroundHook)
+    if (g_foregroundPollThread.joinable())
     {
-        UnhookWinEvent(g_foregroundHook);
+        g_foregroundPollThread.join();
     }
-    if (g_rawInputWindow)
+    if (g_shutdownWatchdogThread.joinable())
     {
-        DestroyWindow(g_rawInputWindow);
+        g_shutdownWatchdogThread.join();
+    }
+    if (g_shutdownCompleteEvent != nullptr)
+    {
+        CloseHandle(g_shutdownCompleteEvent);
+        g_shutdownCompleteEvent = nullptr;
+    }
+    if (g_foregroundRefreshEvent != nullptr)
+    {
+        CloseHandle(g_foregroundRefreshEvent);
+        g_foregroundRefreshEvent = nullptr;
+    }
+    if (g_shutdownEvent != nullptr)
+    {
+        CloseHandle(g_shutdownEvent);
+        g_shutdownEvent = nullptr;
     }
 
     Log(L"worker stop");
