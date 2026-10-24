@@ -40,16 +40,11 @@ released, it injects a press to restore the older one.
 
 ### Hybrid — macro-friendly
 
-Hybrid provides the same release-and-restore SOCD behaviour, but receives
-physical keyboard events through Windows Raw Input instead of installing a
-global low-level keyboard hook. This keeps SnapHook out of the hook chain used
-by AHK, macro pads, accessibility tools, virtual keyboards, and similar
-applications.
+Hybrid provides the same release-and-restore SOCD behaviour, but receives physical keyboard events through Windows Raw Input instead of installing a global low-level keyboard hook. This keeps SnapHook out of the hook chain used by AHK, macro pads, accessibility tools, virtual keyboards, and similar applications.
 
-- Use it when macros become unreliable while a SnapHook pair is configured or
-  while one of the pair keys is held.
-- Real key presses still reach the game; SnapHook only sends the synthetic
-  release and restoration of the opposite key.
+- Use it when macros become unreliable while a SnapHook pair is configured or while one of the pair keys is held.
+- Real key presses still reach the game; SnapHook only adds synthetic events when it needs to release or restore the opposite key.
+- After restoring a key, Hybrid sends a final synthetic key release when you physically release it. This prevents stuck movement if another keyboard hook delays event delivery.
 - It is intended for profiles that need macro compatibility.
 
 ### Blocking — fallback
