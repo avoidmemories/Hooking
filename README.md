@@ -88,10 +88,6 @@ User data lives in `%APPDATA%\SnapHook\`:
 
 ## Limits worth knowing
 
-- **Kernel-level anti-cheat** (Vanguard, and EAC in kernel mode) filters
-  injected events regardless of how they are produced, so no user-mode design
-  can bypass that. The release-only model degrades gracefully there — movement
-  keeps working, snap tap simply has no effect.
 - **Extended keys** (arrows, numpad enter, right Ctrl/Alt, Insert/Home/PgUp)
   need `KEYEVENTF_EXTENDEDKEY`. The worker sets it from the real event flags.
 - **Left and right modifiers** are kept apart by learning the virtual key from

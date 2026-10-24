@@ -146,6 +146,14 @@ struct KeyState
 {
     bool held = false;       // physical key is currently down
     bool scriptDown = false; // the game currently believes this key is down
+    // Hybrid normally relies on the physical key-up to end a restored key.
+    // An external low-level keyboard hook can postpone that injected restore
+    // past the native key-up, though. Remember that we restored this key so
+    // its next real release can explicitly establish the final "up" state.
+    bool needsHybridFinalRelease = false;
+    // Incremented for every real Raw Input event for this key. A deferred
+    // Hybrid restore is valid only while this value remains unchanged.
+    ULONGLONG rawInputVersion = 0;
     WORD vk = 0;             // virtual key, learned from real events (layout-proof)
     WORD scan = 0;
     bool extended = false;
@@ -164,6 +172,17 @@ struct Profile
     std::unordered_set<WORD> managedScanCodes;
     std::unordered_map<WORD, std::vector<WORD>> opponents;
     std::unordered_map<WORD, KeyState> states;
+};
+
+// Hybrid deliberately restores a suppressed key after the current Raw Input
+// batch, rather than halfway through it. This prevents an old restoration from
+// overtaking a real key-up that is already queued behind the current event.
+struct PendingHybridRestore
+{
+    Profile* profile = nullptr;
+    WORD scanCode = 0;
+    WORD causeScanCode = 0;
+    ULONGLONG rawInputVersion = 0;
 };
 
 HHOOK g_hook = nullptr;
@@ -196,6 +215,11 @@ volatile long g_unmanagedEventCount = 0;
 HWINEVENTHOOK g_foregroundHook = nullptr;
 
 std::vector<Profile> g_profiles;
+std::vector<PendingHybridRestore> g_pendingHybridRestores;
+// Reused by the message-owning thread. Keeping capacity after a macro burst
+// avoids an allocation for every keyboard event in normal gameplay.
+std::vector<BYTE> g_rawInputBuffer;
+unsigned int g_hybridRawInputBatchDepth = 0;
 // The profile list is immutable after startup. Only the worker's message thread
 // selects an index and touches the corresponding KeyState objects.
 std::atomic<int> g_activeProfile{-1};
@@ -503,6 +527,8 @@ void ResetAll(Profile& profile)
     {
         entry.second.held = false;
         entry.second.scriptDown = false;
+        entry.second.needsHybridFinalRelease = false;
+        entry.second.rawInputVersion = 0;
     }
 }
 
@@ -642,7 +668,119 @@ void HandleKey(Profile& profile, WORD scanCode, bool down)
 // the same clean restoration used by Release.
 bool RestoreHybridKey(KeyState& state)
 {
-    return SetInjectedKeyState(state, true);
+    if (!SetInjectedKeyState(state, true))
+    {
+        return false;
+    }
+
+    // A physical key-up would normally be sufficient. This flag is only a
+    // final-ordering safeguard for a process that has another keyboard hook.
+    state.needsHybridFinalRelease = true;
+    return true;
+}
+
+// Coalesce repeated requests for the same key. Multiple pair releases can
+// legitimately nominate one held key for restoration; one state-checked
+// keydown at the end of the batch is sufficient.
+void QueueHybridRestore(Profile& profile, WORD scanCode, WORD causeScanCode)
+{
+    auto stateIt = profile.states.find(scanCode);
+    if (stateIt == profile.states.end())
+    {
+        return;
+    }
+
+    KeyState& state = stateIt->second;
+    if (!state.held || state.scriptDown || HasHeldOpponent(profile, scanCode))
+    {
+        return;
+    }
+
+    // Direct callers are used by the deterministic state-machine tests. At
+    // runtime Hybrid always enters through a Raw Input batch below.
+    if (g_hybridRawInputBatchDepth == 0)
+    {
+        if (RestoreHybridKey(state))
+        {
+            Log(L"compat release %u -> restore opponent %u", causeScanCode, state.scan);
+        }
+        return;
+    }
+
+    const auto pendingIt = std::find_if(
+        g_pendingHybridRestores.begin(),
+        g_pendingHybridRestores.end(),
+        [&profile, scanCode](const PendingHybridRestore& pending)
+        {
+            return pending.profile == &profile && pending.scanCode == scanCode;
+        });
+
+    const PendingHybridRestore pending{&profile, scanCode, causeScanCode, state.rawInputVersion};
+    if (pendingIt != g_pendingHybridRestores.end())
+    {
+        *pendingIt = pending;
+    }
+    else
+    {
+        g_pendingHybridRestores.push_back(pending);
+    }
+}
+
+// Runs after the current WM_INPUT event and every Raw Input event that had
+// already accumulated behind it. A later real transition changes the version
+// and cancels the old request, so an already-released key is never revived.
+void FlushPendingHybridRestores()
+{
+    std::vector<PendingHybridRestore> pending;
+    pending.swap(g_pendingHybridRestores);
+
+    for (const PendingHybridRestore& restore : pending)
+    {
+        if (restore.profile == nullptr)
+        {
+            continue;
+        }
+
+        const auto stateIt = restore.profile->states.find(restore.scanCode);
+        if (stateIt == restore.profile->states.end())
+        {
+            continue;
+        }
+
+        KeyState& state = stateIt->second;
+        if (state.rawInputVersion != restore.rawInputVersion ||
+            !state.held || state.scriptDown ||
+            HasHeldOpponent(*restore.profile, restore.scanCode))
+        {
+            continue;
+        }
+
+        if (RestoreHybridKey(state))
+        {
+            Log(L"compat release %u -> restore opponent %u",
+                restore.causeScanCode,
+                state.scan);
+        }
+    }
+}
+
+void BeginHybridRawInputBatch()
+{
+    ++g_hybridRawInputBatchDepth;
+}
+
+void EndHybridRawInputBatch()
+{
+    if (g_hybridRawInputBatchDepth == 0)
+    {
+        return;
+    }
+
+    --g_hybridRawInputBatchDepth;
+    if (g_hybridRawInputBatchDepth == 0)
+    {
+        FlushPendingHybridRestores();
+    }
 }
 
 void HandleHybridKey(Profile& profile, WORD scanCode, bool down)
@@ -698,6 +836,20 @@ void HandleHybridKey(Profile& profile, WORD scanCode, bool down)
     state.held = false;
     state.scriptDown = false;
 
+    // When this key was restored with SendInput, guarantee that a matching
+    // tagged key-up is inserted after the real release is observed. This is
+    // intentionally redundant in the normal case, but closes the ordering
+    // race where another application's low-level hook lets the restoration
+    // arrive at the game after the physical key-up.
+    if (state.needsHybridFinalRelease)
+    {
+        state.needsHybridFinalRelease = false;
+        if (!InjectKey(state, false))
+        {
+            Log(L"compat final release failed  scan=%u", state.scan);
+        }
+    }
+
     for (const WORD opponentScan : opponentsIt->second)
     {
         auto opponentIt = profile.states.find(opponentScan);
@@ -710,10 +862,7 @@ void HandleHybridKey(Profile& profile, WORD scanCode, bool down)
         if (opponent.held && !opponent.scriptDown &&
             !HasHeldOpponent(profile, opponentScan))
         {
-            if (RestoreHybridKey(opponent))
-            {
-                Log(L"compat release %u -> restore opponent %u", state.scan, opponent.scan);
-            }
+            QueueHybridRestore(profile, opponentScan, state.scan);
         }
     }
 }
@@ -1100,6 +1249,7 @@ void SwitchProfile(int next)
     if (Profile* current = ActiveProfile())
     {
         // Leaving a game: hand back anything suppressed, then forget the state.
+        // Raw Input and profile switching are dispatched on this same thread.
         RestoreSuppressedKeys(*current);
         ResetAll(*current);
     }
@@ -1437,6 +1587,10 @@ void HandleRawKeyboardInput(const RAWKEYBOARD& keyboard)
 
     const WORD key = stateIt->first;
     KeyState& state = stateIt->second;
+    // This is the generation guard for a pending end-of-batch restoration.
+    // Repeats count too: once a real event for the key has arrived, an older
+    // synthetic restore must not be allowed to overtake it.
+    ++state.rawInputVersion;
     state.scan = baseScan;
     state.vk = static_cast<WORD>(keyboard.VKey);
     state.extended = extended;
@@ -1469,18 +1623,89 @@ void HandleRawKeyboardInput(const RAWKEYBOARD& keyboard)
     HandleHybridKey(*profile, key, down);
 }
 
+void ProcessRawInput(const RAWINPUT& input)
+{
+    if (input.header.dwType == RIM_TYPEKEYBOARD)
+    {
+        HandleRawKeyboardInput(input.data.keyboard);
+    }
+}
+
+// WM_INPUT gives us the event that woke the window, but a macro can cause more
+// keyboard events to pile up before the message loop returns. Read the current
+// event first, then drain the rest as one ordered batch. This is the sequence
+// recommended by the Raw Input API when both read methods are combined.
+void DrainRawInputBuffer()
+{
+    if (g_rawInputBuffer.empty())
+    {
+        g_rawInputBuffer.resize(sizeof(RAWINPUT) * 16);
+    }
+
+    for (;;)
+    {
+        UINT bufferBytes = static_cast<UINT>(g_rawInputBuffer.size());
+        const UINT count = GetRawInputBuffer(
+            reinterpret_cast<PRAWINPUT>(g_rawInputBuffer.data()),
+            &bufferBytes,
+            sizeof(RAWINPUTHEADER));
+
+        if (count == static_cast<UINT>(-1))
+        {
+            // bufferBytes is the size Windows needs. Grow and retry rather
+            // than leaving the keyboard queue behind a macro burst.
+            const size_t required = bufferBytes == 0
+                ? g_rawInputBuffer.size() * 2
+                : static_cast<size_t>(bufferBytes);
+            if (required <= g_rawInputBuffer.size())
+            {
+                Log(L"raw input buffer read failed  error=%lu", GetLastError());
+                return;
+            }
+
+            g_rawInputBuffer.resize(required);
+            continue;
+        }
+
+        if (count == 0)
+        {
+            return;
+        }
+
+        PRAWINPUT raw = reinterpret_cast<PRAWINPUT>(g_rawInputBuffer.data());
+        for (UINT index = 0; index < count; ++index)
+        {
+            ProcessRawInput(*raw);
+
+            // NEXTRAWINPUTBLOCK in some Windows SDK combinations expands to
+            // the legacy QWORD typedef, which is not declared by this target.
+            // Raw Input blocks are pointer-aligned, so spell out the identical
+            // aligned advance without depending on that SDK macro.
+            const ULONG_PTR alignment = sizeof(ULONG_PTR);
+            const ULONG_PTR next =
+                (reinterpret_cast<ULONG_PTR>(raw) + raw->header.dwSize + alignment - 1) &
+                ~(alignment - 1);
+            raw = reinterpret_cast<PRAWINPUT>(next);
+        }
+    }
+}
+
 LRESULT CALLBACK RawInputWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
 {
     if (message == WM_INPUT)
     {
+        BeginHybridRawInputBatch();
+
         UINT bytes = sizeof(RAWINPUT);
         RAWINPUT input{};
         if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, &input, &bytes,
-                            sizeof(RAWINPUTHEADER)) != static_cast<UINT>(-1) &&
-            input.header.dwType == RIM_TYPEKEYBOARD)
+                            sizeof(RAWINPUTHEADER)) != static_cast<UINT>(-1))
         {
-            HandleRawKeyboardInput(input.data.keyboard);
+            ProcessRawInput(input);
         }
+
+        DrainRawInputBuffer();
+        EndHybridRawInputBatch();
         return 0;
     }
 
@@ -1763,6 +1988,7 @@ void ShutdownOnMessageThread()
 
     g_keyboardHookWanted = false;
     UpdateKeyboardHook();
+
     ReleaseEverythingHeld();
 
     if (g_rawInputWindow != nullptr)
@@ -1866,7 +2092,8 @@ int RunHybridSelfTest(const std::wstring& logPath)
     constexpr WORD keyD = 0x20;
 
     // The normal order from the reported gameplay case: D -> A -> release A
-    // -> release D. D must be restored exactly once while it remains held.
+    // -> release D. D is restored while held, then receives one final tagged
+    // release when its real key-up is observed.
     {
         Profile profile = MakeHybridTestProfile();
         HandleHybridKey(profile, keyD, true);
@@ -1877,10 +2104,11 @@ int RunHybridSelfTest(const std::wstring& logPath)
         check(L"hybrid restores D after A is released",
               !profile.states[keyA].held && !profile.states[keyA].scriptDown &&
               !profile.states[keyD].held && !profile.states[keyD].scriptDown);
-        check(L"hybrid transcript is D up, D down",
-              g_capturedInjections.size() == 2 &&
+        check(L"hybrid transcript is D up, D down, D up",
+              g_capturedInjections.size() == 3 &&
               g_capturedInjections[0].scan == keyD && !g_capturedInjections[0].down &&
-              g_capturedInjections[1].scan == keyD && g_capturedInjections[1].down);
+              g_capturedInjections[1].scan == keyD && g_capturedInjections[1].down &&
+              g_capturedInjections[2].scan == keyD && !g_capturedInjections[2].down);
     }
 
     // Once the originally suppressed key has physically gone up, releasing the
@@ -2016,6 +2244,83 @@ int RunHybridSelfTest(const std::wstring& logPath)
         check(L"raw repeat repairs failed restore without another release",
               g_profiles[0].states[keyD].scriptDown &&
               g_capturedInjections.size() == countBeforeRepeat);
+
+        g_profiles = std::move(savedProfiles);
+        g_activeProfile.store(savedActive, std::memory_order_release);
+    }
+
+    // The worker normally receives one WM_INPUT plus every event that had
+    // accumulated behind it. If A's release asks to restore D but D's physical
+    // key-up is already in that same batch, the restore must be cancelled.
+    {
+        std::vector<Profile> savedProfiles = std::move(g_profiles);
+        const int savedActive = g_activeProfile.load(std::memory_order_relaxed);
+        g_profiles.clear();
+        g_profiles.push_back(MakeHybridTestProfile());
+        g_activeProfile.store(0, std::memory_order_release);
+        g_capturedInjections.clear();
+        g_testSendInputCalls = 0;
+        g_testFailOnSendInputCall = 0;
+
+        RAWKEYBOARD keyDDown{};
+        keyDDown.MakeCode = keyD;
+        keyDDown.VKey = 'D';
+        RAWKEYBOARD keyADown{};
+        keyADown.MakeCode = keyA;
+        keyADown.VKey = 'A';
+        RAWKEYBOARD keyAUp = keyADown;
+        keyAUp.Flags = RI_KEY_BREAK;
+        RAWKEYBOARD keyDUp = keyDDown;
+        keyDUp.Flags = RI_KEY_BREAK;
+
+        BeginHybridRawInputBatch();
+        HandleRawKeyboardInput(keyDDown);
+        HandleRawKeyboardInput(keyADown);
+        HandleRawKeyboardInput(keyAUp);
+        HandleRawKeyboardInput(keyDUp);
+        EndHybridRawInputBatch();
+
+        check(L"raw batch cancels a restore overtaken by D key-up",
+              g_capturedInjections.size() == 1 &&
+              g_capturedInjections[0].scan == keyD && !g_capturedInjections[0].down &&
+              !g_profiles[0].states[keyD].held && !g_profiles[0].states[keyD].scriptDown);
+
+        g_profiles = std::move(savedProfiles);
+        g_activeProfile.store(savedActive, std::memory_order_release);
+    }
+
+    // If no newer event for D exists in the batch, the same deferred path
+    // restores it immediately at the batch boundary, not on a timer.
+    {
+        std::vector<Profile> savedProfiles = std::move(g_profiles);
+        const int savedActive = g_activeProfile.load(std::memory_order_relaxed);
+        g_profiles.clear();
+        g_profiles.push_back(MakeHybridTestProfile());
+        g_activeProfile.store(0, std::memory_order_release);
+        g_capturedInjections.clear();
+        g_testSendInputCalls = 0;
+        g_testFailOnSendInputCall = 0;
+
+        RAWKEYBOARD keyDDown{};
+        keyDDown.MakeCode = keyD;
+        keyDDown.VKey = 'D';
+        RAWKEYBOARD keyADown{};
+        keyADown.MakeCode = keyA;
+        keyADown.VKey = 'A';
+        RAWKEYBOARD keyAUp = keyADown;
+        keyAUp.Flags = RI_KEY_BREAK;
+
+        BeginHybridRawInputBatch();
+        HandleRawKeyboardInput(keyDDown);
+        HandleRawKeyboardInput(keyADown);
+        HandleRawKeyboardInput(keyAUp);
+        EndHybridRawInputBatch();
+
+        check(L"raw batch restores a still-held opponent at its boundary",
+              g_capturedInjections.size() == 2 &&
+              g_capturedInjections[0].scan == keyD && !g_capturedInjections[0].down &&
+              g_capturedInjections[1].scan == keyD && g_capturedInjections[1].down &&
+              g_profiles[0].states[keyD].held && g_profiles[0].states[keyD].scriptDown);
 
         g_profiles = std::move(savedProfiles);
         g_activeProfile.store(savedActive, std::memory_order_release);
