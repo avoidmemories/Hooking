@@ -547,7 +547,7 @@
                                          Background="{StaticResource FieldBrush}"
                                          BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1"
                                          ItemContainerStyle="{StaticResource SidebarItem}"
-                                         ScrollViewer.CanContentScroll="True"
+                                         ScrollViewer.CanContentScroll="False"
                                          ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                                          VirtualizingPanel.IsVirtualizing="True"
                                          VirtualizingPanel.VirtualizationMode="Recycling"

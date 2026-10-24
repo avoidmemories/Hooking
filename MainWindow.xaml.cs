@@ -52,7 +52,6 @@ public partial class MainWindow : Window
     private readonly List<ProcessCandidate> _processCandidates = [];
     private int _processListLoadVersion;
     private bool _updatingMode;
-    private StarBorderEffect? _starEffect;
 
     /// <summary>True once the title has been typed in by hand.</summary>
     private bool _titleEditedByUser;
@@ -246,7 +245,6 @@ public partial class MainWindow : Window
 
         StopStatusTimer();
         _watchdog?.Stop();
-        _starEffect?.Dispose();
         _worker.Dispose();
         _tray.Dispose();
     }
@@ -2321,17 +2319,13 @@ public partial class MainWindow : Window
         // exactly the "on every other try" behaviour.
         ApplySettings();
 
-        // Painted after the restart, then the glow plays over the result.
+        // Painted after the restart, then the control acknowledges the change.
         AnimateSwitchFlash();
     }
 
     private void UpdateMasterSwitch()
     {
         var on = _settings.SnapHookEnabled;
-
-        // The orbiting light is created once, the first time the switch is
-        // painted, and then only started or stopped.
-        _starEffect ??= StarBorderEffect.Attach(MasterSwitch);
 
         MasterToggle.IsChecked = on;
         _tray.SetActive(on);
@@ -2342,15 +2336,6 @@ public partial class MainWindow : Window
         MasterSwitch.BorderBrush = (Brush)FindResource(on ? "TextBrush" : "BorderBrushSoft");
         MasterSwitch.Background = (Brush)FindResource(on ? "RaisedBrush" : "PanelBrush");
 
-        // Armed, the outline carries a travelling highlight; disarmed, it rests.
-        if (on)
-        {
-            _starEffect.Start(TimeSpan.FromSeconds(2.6));
-        }
-        else
-        {
-            _starEffect.Stop();
-        }
     }
 
     /// <summary>
