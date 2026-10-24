@@ -108,11 +108,6 @@ public partial class MainWindow : Window
     private DispatcherTimer? _watchdog;
 
     /// <summary>
-    /// Set when the application was started with Windows, so the window is never shown.
-    /// </summary>
-    private bool _startInTray;
-
-    /// <summary>
     /// How often the running indicators and the engine status are re-read.
     ///
     /// A game can be started or closed at any moment, and nothing notifies the
@@ -141,21 +136,28 @@ public partial class MainWindow : Window
         ConfigureWindowChrome();
         Closing += Window_Closing;
 
-        // Loaded fires only when the window is actually laid out. If the app is
-        // started hidden, minimised or without a desktop, nothing below would run
-        // and the engine would never be armed, with no trace anywhere. Content
-        // rendering is the reliable hook, with Loaded kept as a fallback.
+        // This is a fallback for diagnostic tools that construct the window directly.
+        // Normal startup uses Start, so a --tray launch never needs to show a window.
         Loaded += Window_Loaded;
-        ContentRendered += Window_ContentRendered;
     }
 
     // ------------------------------------------------------------------ startup
 
-    private void Window_ContentRendered(object? sender, EventArgs e) => Window_Loaded(this, new RoutedEventArgs());
-
     private void Window_Loaded(object sender, RoutedEventArgs e)
     {
-        // Loaded and ContentRendered can both fire; the work must happen once.
+        InitializeApplication();
+
+        // A tray launch has no measured controls until the first user-open. Place the
+        // input-method selection now that WPF has measured the visible window.
+        UpdateModeButtons();
+    }
+
+    /// <summary>
+    /// Starts the engine and prepares the interface exactly once. It does not need a
+    /// visible WPF window, which keeps Windows sign-in launches completely silent.
+    /// </summary>
+    private void InitializeApplication()
+    {
         if (_started)
         {
             return;
@@ -203,35 +205,24 @@ public partial class MainWindow : Window
         }, Dispatcher);
         _watchdog.Start();
 
-        // Started with Windows: the window was shown invisibly only so that it would
-        // be laid out and this startup code would run. It goes straight back to the tray.
-        if (_startInTray)
-        {
-            _startInTray = false;
-            ShowInTaskbar = true;
-            Opacity = 1;
-            HideToTray();
-        }
     }
 
     /// <summary>
-    /// Shows the window, or, when started with Windows, keeps it in the tray.
-    ///
-    /// WPF only lays the window out once it has been shown, and the startup work runs
-    /// after the first frame. So the window is shown with zero opacity and kept out of
-    /// the taskbar, and it is hidden again as soon as that startup work is finished.
+    /// Starts the application. The notification icon has its own native message window,
+    /// so a tray launch can start the engine without creating a desktop window first.
     /// </summary>
     public void Start(bool inTray)
     {
-        if (!inTray)
+        InitializeApplication();
+
+        if (inTray)
         {
-            Show();
+            // The watchdog remains active; the visible status refresh resumes when the
+            // user explicitly opens the application from the notification area.
+            StopStatusTimer();
             return;
         }
 
-        _startInTray = true;
-        ShowInTaskbar = false;
-        Opacity = 0;
         Show();
     }
 
@@ -277,13 +268,13 @@ public partial class MainWindow : Window
     /// </summary>
     public void ShowFromTray()
     {
+        InitializeApplication();
+
         if (WindowState == WindowState.Minimized)
         {
             WindowState = WindowState.Normal;
         }
 
-        // Restored in case the window is still in its invisible startup state.
-        Opacity = 1;
         ShowInTaskbar = true;
 
         Show();
